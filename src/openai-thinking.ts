@@ -84,8 +84,9 @@ export function restoreOpenAiThinking(
         || (part.encryptedContent !== undefined && typeof part.encryptedContent !== 'string')) return [];
       parts.push(part as unknown as ReasoningPart);
     }
-    // OpenCode Go answers 400 invalid_encrypted_content to ciphertext it did not
-    // produce, and one such item fails every later turn of the conversation.
+    // Ciphertext only decrypts where it was made: OpenCode Go answers 400
+    // invalid_encrypted_content to items it cannot decrypt, and one such item
+    // fails every later turn of the conversation.
     if (npm !== '@ai-sdk/openai' || envelope.origin !== origin) return text ? [{ type: 'reasoning', text }] : [];
     return parts.map(part => ({
       type: 'reasoning', text: part.text,

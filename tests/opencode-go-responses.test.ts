@@ -19,7 +19,7 @@ import { streamAnthropicResponse, translateRequest } from '../src/sdk-adapter.js
 // answers HTTP 500 for it on every request, while the same key and body shape work
 // for its Chat Completions models. The wire tests replace only `fetch` below
 // translateRequest and createLanguageModel; the step that turns a proxy or server
-// route into their inputs is covered by the materialize tests, not here.
+// route into their inputs is covered in opencode-go-session-header.test.ts.
 
 const SESSION_ID = '7d0f4a52-1c2b-4e8a-9b6f-3c5d2e1f0a9b';
 const LUNA = 'gpt-5.6-luna';

@@ -11,7 +11,8 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
 - Inline `role:'system'` messages stay in their original conversation positions, so volatile
   reminders do not invalidate the stable prompt prefix.
 - On public-API OpenAI GPT-5.6+ routes, and OpenCode Go's Responses model (the check keys on the
-  model id), Anthropic `cache_control` blocks become explicit OpenAI cache breakpoints. ChatGPT/Codex OAuth sends a hashed Claude session-derived `prompt_cache_key`
+  model id), Anthropic `cache_control` blocks become explicit OpenAI cache breakpoints.
+  ChatGPT/Codex OAuth sends a hashed Claude session-derived `prompt_cache_key`
   and strips Claude Code's volatile billing-attribution header from instructions, but omits
   `prompt_cache_options` and explicit breakpoints — those produced successful-but-empty OAuth
   responses in testing.
@@ -34,7 +35,10 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   `@ai-sdk/openai`, so an envelope streamed on a Go route records `origin: "opencode-go"` and its
   ciphertext is replayed only to a Go route; OpenAI envelopes carry no origin and are never replayed
   to Go, nor is any non-envelope signature. Go answers `400 invalid_encrypted_content` to
-  ciphertext it did not produce, which would fail every later turn. Older clodex builds cannot decode these new
+  ciphertext it cannot decrypt (measured with garbage, tampered and wrong-id items, not with real
+  OpenAI ciphertext), which would fail every later turn. Builds that read envelopes but predate
+  `origin` ignore it, so a Go Luna transcript resumed on one and switched to OpenAI sends Go
+  ciphertext to OpenAI. Older clodex builds cannot decode these new
   signatures and would forward the envelope as provider ciphertext, which can cause upstream errors.
   Resume such transcripts with an envelope-aware build rather than downgrading the bridge. This does not
   change non-streaming responses' existing omission of reasoning, or the transport's prohibition
