@@ -64,6 +64,7 @@ import {
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 import { openCodeGoSessionHeaders } from '../data/opencode-go-models.js';
+import { anthropicBodyForUpstream } from '../third-party-anthropic-body.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
 
 export interface ServerOptions {
@@ -324,7 +325,10 @@ async function handleAnthropicMessages(
     const betaHeaderRaw = req.headers['anthropic-beta'];
     const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
     const clientWantsStream = Boolean(body.stream);
-    const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
+    const forwardBody: Record<string, unknown> = anthropicBodyForUpstream(
+      { ...body, model: upstreamModelId(model) },
+      { providerId: model.providerId, baseUrl: model.baseUrl },
+    );
     const authType = model.authType ?? 'api';
     const isOAuth = authType === 'oauth';
     const goSessionHeaders = openCodeGoSessionHeaders(model, claudeSessionId);
@@ -640,7 +644,10 @@ async function handleAnthropicCountTokens(
   const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
   const authType = model.authType ?? 'api';
   const isOAuth = authType === 'oauth';
-  const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
+  const forwardBody: Record<string, unknown> = anthropicBodyForUpstream(
+    { ...body, model: upstreamModelId(model) },
+    { providerId: model.providerId, baseUrl: model.baseUrl },
+  );
   const refreshToken = isOAuth && model.providerId && model.authRef
     ? (rejectedAccessToken: string) => resolveModelApiKey(
         model,

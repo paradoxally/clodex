@@ -1,9 +1,10 @@
 // Tool-search helpers for Anthropic ↔ upstream proxy translation.
 //
-// Claude Code defers MCP tools (defer_loading: true) and discovers them via
-// tool_reference blocks. Upstream models (Gemini, OpenAI) only receive tools
-// that are immediately available: non-deferred, tool-search, and any tool
-// already referenced in the conversation.
+// Claude Code defers MCP tools (defer_loading: true) and loads them through
+// ToolSearch tool_reference blocks, or through tool_addition blocks in a
+// mid-conversation system message when the tools connect late. Upstream models
+// (Gemini, OpenAI) only receive tools that are immediately available:
+// non-deferred, tool-search, and any tool already loaded in the conversation.
 
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 
@@ -13,6 +14,14 @@ export function isToolSearchTool(tool: AnthropicToolDefinition): boolean {
   if (typeof tool.type === 'string' && tool.type.startsWith(TOOL_SEARCH_TYPE_PREFIX)) return true;
   const name = tool.name ?? '';
   return name.includes('tool_search') || name === 'ToolSearch';
+}
+
+export function toolAdditionName(block: Record<string, unknown>): string | undefined {
+  if (block.type !== 'tool_addition') return undefined;
+  const tool = block.tool;
+  if (!tool || typeof tool !== 'object') return undefined;
+  const name = (tool as Record<string, unknown>).name;
+  return typeof name === 'string' ? name : undefined;
 }
 
 /** Collect tool names referenced anywhere in the message history. */
@@ -30,6 +39,9 @@ export function extractReferencedToolNames(messages: AnthropicRequestMessage[] |
       if (part.type === 'tool_reference' && typeof part.tool_name === 'string') {
         names.add(part.tool_name);
       }
+
+      const addedTool = toolAdditionName(part);
+      if (addedTool !== undefined) names.add(addedTool);
 
       if (part.type === 'tool_search_tool_result') {
         const inner = part.content as Record<string, unknown> | undefined;
