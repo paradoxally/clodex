@@ -51,8 +51,19 @@ const REQUIRED_238 = [
 ].map(p => `${p}@2.1.238`);
 
 const CONFIG = {
-  'clodex:openai-oauth:gpt-5.6-sol': { alias: 'sol', context: 272_000, display: 'GPT-5.6 Sol (OpenAI (ChatGPT))' },
-  'clodex:openai-oauth:gpt-5.6-luna': { alias: 'luna', display: 'GPT-5.6 Luna (OpenAI (ChatGPT))' },
+  'clodex:openai-oauth:gpt-5.6-sol': {
+    alias: 'sol',
+    context: 272_000,
+    display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+    name: 'GPT-5.6 Sol',
+    provider: 'OpenAI (ChatGPT)',
+  },
+  'clodex:openai-oauth:gpt-5.6-luna': {
+    alias: 'luna',
+    display: 'GPT-5.6 Luna (OpenAI (ChatGPT))',
+    name: 'GPT-5.6 Luna',
+    provider: 'OpenAI (ChatGPT)',
+  },
 };
 
 function bundles(): string[] {
@@ -172,7 +183,7 @@ describe('Claude Code 2.1.238 — PATCH 5 anchor over real pristine bundles', ()
       // 2. the patch reports OK and injects exactly once
       const out = applyClodexPatches(source, CONFIG);
       expect(out.results.find(r => r.name.startsWith('PATCH 5'))?.status).toBe('OK');
-      const injections = [...out.content.matchAll(/\{value:"sol",label:"Sol"/g)];
+      const injections = [...out.content.matchAll(/\{value:"sol",/g)];
       expect(injections.length, 'exactly one injection').toBe(1);
 
       // 3. the bound function is the picker on its own content, and the array it pushes into is
@@ -247,7 +258,7 @@ describe('Claude Code 2.1.238 — PATCH 5 anchor over real pristine bundles', ()
         name: 'PATCH 5: model picker options',
         extra: 'model selection appears 2 times (expected 1)',
       });
-      expect(out.content, 'nothing was injected').not.toContain('{value:"sol",label:"Sol"');
+      expect(out.content, 'nothing was injected').not.toContain('{value:"sol",');
       expect(out.content, 'the twin is left exactly as it was').toContain(twin);
       expect(out.content, 'the drifted picker is left exactly as it was')
         .toContain(match[0]!.replace('for(let', 'for (let'));

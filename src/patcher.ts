@@ -107,6 +107,7 @@ import {
 } from './patch-backup.js';
 import type { Installation } from 'tweakcc';
 import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
+import { formatModelLabel } from './ui.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
 import { getPatchReasoningCapabilities } from './provider-factory.js';
 import {
@@ -216,6 +217,10 @@ export interface PatchModelMeta {
   pricingBoundary?: number;
   /** Canonical label, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   displayName?: string;
+  /** The model half of `displayName`, e.g. `GPT-5.6 Sol`. */
+  modelName?: string;
+  /** The provider half of `displayName`, e.g. `OpenAI (ChatGPT)`. */
+  providerName?: string;
   effort?: {
     levels: string[];
     defaultLevel: string;
@@ -269,6 +274,10 @@ export function buildPatchModelConfig(
     else if (context !== 200_000) entry.context = context;
     const display = meta?.displayName?.trim();
     if (display) entry.display = display;
+    const name = meta?.modelName?.trim();
+    if (name) entry.name = name;
+    const providerName = meta?.providerName?.trim();
+    if (providerName) entry.provider = providerName;
     const effort = projectNativeEffort(meta?.effort);
     if (effort) entry.effort = effort;
     config[id] = entry;
@@ -315,6 +324,8 @@ export function computePatchConfigHash(
       entry.display ?? null,
       entry.effort?.levels ?? null,
       entry.effort?.defaultLevel ?? null,
+      entry.name ?? null,
+      entry.provider ?? null,
     ];
   });
   const payload: unknown[] = [transformsVersion, canonical];
@@ -384,6 +395,8 @@ export function buildDesiredPatchConfig(
         pricingBoundary: limits.pricingBoundary,
         // Same label `clodex server` prints at startup and `models --list` shows.
         displayName: httpProxyDisplayName(model, provider.name),
+        modelName: formatModelLabel(model),
+        providerName: provider.name,
         effort: effort.mode === 'controllable'
           ? { levels: effort.levels, defaultLevel: effort.defaultLevel }
           : undefined,

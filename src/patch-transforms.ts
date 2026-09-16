@@ -86,14 +86,25 @@ import {
  * bumped because the rule above says a changed anchor is bumped — an install
  * patched by an older clodex is not wrong, but it was produced by a transform set
  * whose anchors are narrower, so it re-reads as stale rather than current.
+ *
+ * 13 — PATCH 5 titles each injected /model picker row with the model's own name
+ * (`GPT-5.6 Luna`) instead of the title-cased alias (`Luna`), and its description
+ * becomes `<provider> · /model <alias>`. No anchor changed and `value` is still
+ * the alias. Every existing config hash changes regardless, because `name` and
+ * `provider` joined it; the bump follows the rule that a changed replacement
+ * bumps.
  */
-export const PATCH_TRANSFORMS_VERSION = 12;
+export const PATCH_TRANSFORMS_VERSION = 13;
 
 export interface PatchScriptModelEntry {
   alias?: string;
   context?: number;
-  /** Human label for the /model picker, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
+  /** Full human label, model and provider, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   display?: string;
+  /** The model's own name, e.g. `GPT-5.6 Sol` — the /model picker row title. */
+  name?: string;
+  /** The provider's display name, e.g. `OpenAI (ChatGPT)`. */
+  provider?: string;
   /** Provider reasoning levels projected onto Claude Code's native effort ladder. */
   effort?: PatchScriptEffort;
 }
@@ -119,6 +130,24 @@ export function projectNativeEffort(
   if (!levels.some(level => level === effort.defaultLevel)) return undefined;
   // The native client defaults custom identities to high; preserve that contract.
   return { levels, defaultLevel: 'high' };
+}
+
+/**
+ * The `{value,label,description}` literal PATCH 5 injects for one alias. The built-in postcondition
+ * proof rebuilds the row through this same function, so the two cannot disagree about its bytes.
+ *
+ * The literal is pure ASCII: Bun loads Claude Code's modules as Latin-1, so a raw UTF-8 character
+ * such as `·` renders as `Â·`. Non-ASCII is written as a `\u` escape instead.
+ */
+export function modelPickerOption(alias: string, id: string, entry: PatchScriptModelEntry): string {
+  const name = entry.name ? String(entry.name) : '';
+  const label = name || alias.charAt(0).toUpperCase() + alias.slice(1);
+  const description = name
+    ? (entry.provider ? String(entry.provider) + ' · ' : '') + '/model ' + alias
+    : 'Custom model (' + id + ')';
+  const ascii = (value: string) => JSON.stringify(value)
+    .replace(/[^\x00-\x7f]/g, (char) => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0'));
+  return '{value:' + ascii(alias) + ',label:' + ascii(label) + ',description:' + ascii(description) + '}';
 }
 
 export type PatchSiteStatus = 'OK' | 'SKIP' | 'FAIL';
@@ -174,8 +203,9 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // so the name the binary validates == the name it sends upstream == the name
   // the proxy echoes back == the key its context window is stored under.
   const IDENTITIES: string[] = [];
-  // identity -> human label for the /model picker (falls back at use site)
+  // identity -> human label for the Agent tool description
   const DISPLAY_BY_IDENTITY: Record<string, string> = Object.create(null);
+  const ENTRY_BY_ALIAS: Record<string, PatchScriptModelEntry> = Object.create(null);
   // lowercased alias AND id -> context-window tokens (only for models that set it)
   const CONTEXT_BY_KEY: Record<string, number> = Object.create(null);
   // lowercased alias AND id for every configured model. Capability verdicts
@@ -215,6 +245,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         fail('clodex patch: reserved alias "' + a + '" cannot be reassigned');
       }
       ALIAS_TO_ID[a] = String(id);
+      ENTRY_BY_ALIAS[a] = spec;
       IDENTITIES.push(a);
       if (spec.display) DISPLAY_BY_IDENTITY[a] = String(spec.display);
     } else {
@@ -263,11 +294,6 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   const ALIASES = Object.keys(ALIAS_TO_ID);
   const MODELS = Object.keys(MODEL_CONFIG);
   if (MODELS.length === 0) fail('clodex patch: MODEL_CONFIG is empty');
-
-  /** Picker/description label for an identity; falls back to the old wording. */
-  function displayFor(identity: string, fallbackId: string): string {
-    return DISPLAY_BY_IDENTITY[identity] || 'Custom model (' + fallbackId + ')';
-  }
 
   const reEsc = (s: string) => s.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
   const q = (s: string) => JSON.stringify(s); // safe JS string literal
@@ -447,13 +473,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   {
     const missing = ALIASES.filter((a) => !new RegExp('value:' + reEsc(q(a))).test(js));
     const entries = missing
-      .map(
-        // value = the alias (the name the user types and the binary sends);
-        // description = the real model label, e.g. "GPT-5.6 Sol (OpenAI (ChatGPT))".
-        // (tweakcc's writeContent round-trips utf8 faithfully — verified — so the
-        // old adhoc-patch ASCII-only constraint no longer applies.)
-        (a) => '{value:' + q(a) + ',label:' + q(a.charAt(0).toUpperCase() + a.slice(1)) + ',description:' + q(displayFor(a, ALIAS_TO_ID[a]!)) + '}'
-      )
+      .map((a) => modelPickerOption(a, ALIAS_TO_ID[a]!, ENTRY_BY_ALIAS[a]!))
       .join(',');
     /** The append snippet, bound to whatever this build named the options array. */
     const injectInto = (options: string) =>
