@@ -4,7 +4,7 @@ import type { FullStreamPart } from '../src/proxy-shared.js';
 
 type ThinkingBlock = { type: 'thinking'; thinking: string; signature: string };
 
-async function display(parts: FullStreamPart[]): Promise<ThinkingBlock[]> {
+async function display(parts: FullStreamPart[], origin?: string): Promise<ThinkingBlock[]> {
   const blocks: ThinkingBlock[] = [];
   await writeAnthropicStream((async function* () { yield* parts; })(), 'test-model', chunk => {
     const data = JSON.parse(chunk.split('\ndata: ')[1]);
@@ -14,7 +14,7 @@ async function display(parts: FullStreamPart[]): Promise<ThinkingBlock[]> {
       if (data.delta.type === 'thinking_delta') block.thinking += data.delta.thinking;
       if (data.delta.type === 'signature_delta') block.signature = data.delta.signature;
     }
-  });
+  }, undefined, undefined, undefined, origin);
   return blocks;
 }
 
@@ -33,8 +33,8 @@ const originalParts = [
   start('rs_b:0', 'rs_b'), delta('rs_b:0', 'Third.'), end('rs_b:0', 'rs_b', 'cipher-b'),
 ];
 
-function echo(blocks: ThinkingBlock[], npm = '@ai-sdk/openai') {
-  return translateMessages([{ role: 'assistant', content: blocks }], npm);
+function echo(blocks: ThinkingBlock[], npm = '@ai-sdk/openai', origin?: string) {
+  return translateMessages([{ role: 'assistant', content: blocks }], npm, false, origin);
 }
 
 const expected = [{
@@ -120,6 +120,32 @@ describe('OpenAI thinking round-trip metadata', () => {
     expect(echo(blocks, '@ai-sdk/openai-compatible')).toEqual([{
       role: 'assistant', content: [{ type: 'reasoning', text: 'First.\n\nSecond.\n\nThird.' }],
     }]);
+  });
+
+  it('replays ciphertext only to the provider that produced it', async () => {
+    const displayOnly = [{
+      role: 'assistant', content: [{ type: 'reasoning', text: 'First.\n\nSecond.\n\nThird.' }],
+    }];
+    const goBlocks = await display(originalParts, 'opencode-go');
+    expect(echo(goBlocks, '@ai-sdk/openai', 'opencode-go')).toEqual(expected);
+    expect(echo(goBlocks, '@ai-sdk/openai')).toEqual(displayOnly);
+
+    const openAiBlocks = await display(originalParts);
+    expect(openAiBlocks[0]!.signature).not.toContain('origin');
+    expect(echo(openAiBlocks, '@ai-sdk/openai')).toEqual(expected);
+    expect(echo(openAiBlocks, '@ai-sdk/openai', 'opencode-go')).toEqual(displayOnly);
+  });
+
+  it('never hands an origin-bound provider a signature that is not its own envelope', () => {
+    for (const signature of ['legacy-cipher', 'EqQBCkgIBxABGAIiQClaude-signature']) {
+      expect(echo([{ type: 'thinking', thinking: 'Earlier summary', signature }], '@ai-sdk/openai', 'opencode-go'))
+        .toEqual([{ role: 'assistant', content: [{ type: 'reasoning', text: 'Earlier summary' }] }]);
+    }
+    const envelope = 'clodex:openai-thinking:v1:' + JSON.stringify({
+      parts: [{ itemId: 'rs_fixture', text: 'abc', encryptedContent: 'fixture-cipher' }],
+      origin: 7,
+    });
+    expect(echo([{ type: 'thinking', thinking: 'abc', signature: envelope }], '@ai-sdk/openai', 'opencode-go')).toEqual([]);
   });
 
   it('restores original summaries rather than edited, truncated, or missing display text', async () => {

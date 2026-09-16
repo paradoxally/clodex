@@ -7,7 +7,7 @@ export const OPENCODE_GO_PROVIDER_NAME = 'OpenCode Go';
 export const OPENCODE_GO_COMPLETIONS_BASE_URL = 'https://opencode.ai/zen/go/v1';
 export const OPENCODE_GO_ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 export const OPENCODE_GO_SOURCE = 'https://models.dev/api.json';
-export const OPENCODE_GO_SOURCE_FETCHED_AT = '2026-09-11T08:20:44.219Z';
+export const OPENCODE_GO_SOURCE_FETCHED_AT = '2026-09-16T21:03:59.152Z';
 
 type OpenCodeGoModel = Pick<CachedModel, 'id' | 'name'>
   & Partial<Omit<CachedModel, 'id' | 'name'>>;
@@ -19,9 +19,9 @@ type OpenCodeGoModel = Pick<CachedModel, 'id' | 'name'>
  * catalog (models.dev); per-model wire transport and compatibility behavior
  * are clodex's live-validated knowledge in the updater script. The upstream
  * catalog mixes Anthropic Messages, Chat Completions, and Responses
- * transports. Clodex intentionally publishes only the first two;
- * Responses-only entries (currently Grok and mainline GPT) never enter the
- * provider allowlist.
+ * transports. A Responses entry enters the provider allowlist only once its
+ * wire behaviour is verified against the live endpoint (gpt-5.6-luna); the
+ * rest (currently Grok and mainline GPT) stay out.
  */
 export function buildOpenCodeGoModels(): OpenCodeGoModel[] {
   return structuredClone(models) as unknown as OpenCodeGoModel[];
@@ -31,13 +31,6 @@ export function buildOpenCodeGoModels(): OpenCodeGoModel[] {
 const OPENCODE_GO_FALLBACK_SESSION_ID = randomUUID();
 
 /**
- * OpenCode Go rejects any request that carries no session id — both
- * `/v1/messages` and `/v1/chat/completions` answer
- * `MissingSessionID: Request is missing x-opencode-session` (measured
- * 2026-09-11 against the live endpoint). The header lets Go pin a conversation
- * to one backend and keep its prefix cache warm, so forward Claude Code's own
- * session id where one is known and fall back to a stable per-process id.
- *
  * A model counts as Go by provider id or by pointing at the Go base URL. The
  * URL arm is what covers an imported or migrated provider whose id has drifted
  * from the canonical `opencode-go` (a shape `registry/resolve-template.ts`
@@ -48,13 +41,27 @@ const OPENCODE_GO_FALLBACK_SESSION_ID = randomUUID();
  * `baseUrl` is the anthropic-format sibling; `apiUrl` is the cached-registry
  * spelling.
  */
+export function isOpenCodeGoModel(
+  model: { providerId?: string; apiUrl?: string; baseUrl?: string; apiBaseUrl?: string },
+): boolean {
+  const url = String(model.apiBaseUrl ?? model.baseUrl ?? model.apiUrl ?? '');
+  return model.providerId === OPENCODE_GO_PROVIDER_ID
+    || /^https:\/\/opencode\.ai\/zen\/go(\/|$)/.test(url);
+}
+
+/**
+ * OpenCode Go rejects any request that carries no session id — `/v1/messages`,
+ * `/v1/chat/completions` and `/v1/responses` all answer
+ * `MissingSessionID: Request is missing x-opencode-session` (measured
+ * 2026-09-11, and 2026-09-16 for `/v1/responses`, against the live endpoint).
+ * The header lets Go pin a conversation to one backend and keep its prefix
+ * cache warm, so forward Claude Code's own session id where one is known and
+ * fall back to a stable per-process id.
+ */
 export function openCodeGoSessionHeaders(
   model: { providerId?: string; apiUrl?: string; baseUrl?: string; apiBaseUrl?: string },
   claudeSessionId: string | undefined,
 ): Record<string, string> | undefined {
-  const url = String(model.apiBaseUrl ?? model.baseUrl ?? model.apiUrl ?? '');
-  const isGo = model.providerId === OPENCODE_GO_PROVIDER_ID
-    || /^https:\/\/opencode\.ai\/zen\/go(\/|$)/.test(url);
-  if (!isGo) return undefined;
+  if (!isOpenCodeGoModel(model)) return undefined;
   return { 'x-opencode-session': claudeSessionId ?? OPENCODE_GO_FALLBACK_SESSION_ID };
 }

@@ -63,8 +63,9 @@
 //     something verified here; the vercel maintainers could not reproduce it
 //     from a synthetic case). clodex does not meet that path: `translateTools`
 //     sends `strict: false` on `@ai-sdk/openai`, which covers both OpenAI
-//     routes, and `@ai-sdk/openai-compatible` goes to Chat Completions, which
-//     is non-strict by default. The explicit opt-out is load-bearing for
+//     routes and OpenCode Go's Responses model, and
+//     `@ai-sdk/openai-compatible` goes to Chat Completions, which is
+//     non-strict by default. The explicit opt-out is load-bearing for
 //     keeping Artifact's `collection` lookahead in the payload; if it is ever
 //     removed, lookaround has to be stripped here too.
 //

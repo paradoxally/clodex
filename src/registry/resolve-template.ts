@@ -79,6 +79,8 @@ export function retainedOpenCodeGoTemplate(): ProviderTemplate | undefined {
  */
 export function openCodeGoPinnedApiUrl(npm: string): string | null {
   if (npm === '@ai-sdk/openai-compatible') return OPENCODE_GO_COMPLETIONS_BASE_URL;
+  // Responses models: the OpenAI SDK appends /responses to the same /v1 base.
+  if (npm === '@ai-sdk/openai') return OPENCODE_GO_COMPLETIONS_BASE_URL;
   if (npm === '@ai-sdk/anthropic') return OPENCODE_GO_ANTHROPIC_BASE_URL;
   return null;
 }

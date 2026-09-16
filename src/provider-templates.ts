@@ -74,7 +74,7 @@ export interface ProviderTemplate {
  * rejected as keys.
  */
 export async function verifyOpenCodeGoCredential(apiKey: string): Promise<string | null> {
-  const model = buildOpenCodeGoModels().find(entry => entry.modelFormat === 'openai');
+  const model = buildOpenCodeGoModels().find(entry => entry.npm === '@ai-sdk/openai-compatible');
   if (!model) return null;
   try {
     const response = await fetch(`${OPENCODE_GO_COMPLETIONS_BASE_URL}/chat/completions`, {

@@ -18,6 +18,7 @@ import {
   transformOpenAiCompatibleRequestBody,
   type ModelRuntimeCompatibility,
 } from './model-runtime-compatibility.js';
+import { isOpenCodeGoModel, OPENCODE_GO_COMPLETIONS_BASE_URL } from './data/opencode-go-models.js';
 
 /** Models that must use /v1/responses instead of /v1/chat/completions. */
 const RESPONSES_ONLY_PREFIXES = [
@@ -167,6 +168,21 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
     const useResponsesEndpoint = shouldUseOpenAiResponsesEndpoint(modelId);
+    // Decided before the auth branches, which would send a Go credential to
+    // chatgpt.com or a Go conversation to api.openai.com. The destination is the
+    // reviewed literal, not the route's URL.
+    if (isOpenCodeGoModel({ providerId: spec.providerId, apiBaseUrl: baseURL })) {
+      if (spec.authType === 'oauth') {
+        throw new Error('OpenCode Go routes take an API key; refusing an OAuth credential.');
+      }
+      const openai = createOpenAI({
+        apiKey: spec.authType === 'none' ? '' : apiKey,
+        baseURL: OPENCODE_GO_COMPLETIONS_BASE_URL,
+        ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
+        ...(spec.headers ? { headers: spec.headers } : {}),
+      });
+      return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
+    }
     const tokenAccountId = spec.authType === 'oauth'
       ? extractOpenAiAccountId({ access_token: apiKey })?.trim()
       : undefined;
@@ -1031,6 +1047,13 @@ export function effortProviderOptions(
     if (!reasoningEffort) return undefined;
     const key = metadata.providerId ? toCamelCase(metadata.providerId) : 'openaiCompatible';
     return { [key]: { reasoningEffort } };
+  }
+
+  // A curated ladder describes the gateway in front of the model, which the
+  // OpenAI family rules below do not: OpenCode Go's Luna takes `off` as `none`.
+  if (npm === '@ai-sdk/openai' && modelId && metadata?.compatibility) {
+    const reasoningEffort = compatibilityReasoningEffort(effort, modelId, metadata.compatibility);
+    return reasoningEffort ? { openai: { reasoningEffort, forceReasoning: true } } : undefined;
   }
 
   if (isOpenRouterRoute(npm, metadata)) {

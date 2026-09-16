@@ -837,7 +837,7 @@ describe('refreshProviderModels', () => {
   });
 
   it('fails closed when an OpenCode record names an SDK package the provider does not serve', async () => {
-    const registry = openCodeRegistry({ npm: '@ai-sdk/openai' });
+    const registry = openCodeRegistry({ npm: '@ai-sdk/xai' });
 
     const result = await refreshProviderModels('opencode-go', 'oc-real-key', registry);
 
@@ -845,12 +845,13 @@ describe('refreshProviderModels', () => {
     expect(fetchTemplateModels).not.toHaveBeenCalled();
     expect(saveRegistry).not.toHaveBeenCalled();
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/does not support the @ai-sdk\/openai SDK package/i);
+    expect(result.reason).toMatch(/does not support the @ai-sdk\/xai SDK package/i);
   });
 
   it.each([
     ['@ai-sdk/openai-compatible', OPENCODE_GO_ANTHROPIC_BASE_URL],
     ['@ai-sdk/anthropic', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['@ai-sdk/openai', OPENCODE_GO_ANTHROPIC_BASE_URL],
   ])('refuses mismatched OpenCode package/destination pair %s before network or writes', async (npm, url) => {
     const registry = openCodeRegistry({ npm, url });
 

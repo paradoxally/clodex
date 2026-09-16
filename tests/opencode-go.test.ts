@@ -291,7 +291,7 @@ describe('verifyOpenCodeGoCredential', () => {
     // committed catalog model or every key looks rejected.
     const body = JSON.parse(String(init.body)) as { model?: string };
     const catalogIds = buildOpenCodeGoModels()
-      .filter(entry => entry.modelFormat === 'openai')
+      .filter(entry => entry.npm === '@ai-sdk/openai-compatible')
       .map(entry => entry.upstreamModelId ?? entry.id);
     expect(catalogIds).toContain(body.model);
   });

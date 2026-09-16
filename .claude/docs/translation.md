@@ -10,8 +10,9 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
 
 - Inline `role:'system'` messages stay in their original conversation positions, so volatile
   reminders do not invalidate the stable prompt prefix.
-- On public-API OpenAI GPT-5.6+ routes, Anthropic `cache_control` blocks become explicit OpenAI
-  cache breakpoints. ChatGPT/Codex OAuth sends a hashed Claude session-derived `prompt_cache_key`
+- On public-API OpenAI GPT-5.6+ routes, and OpenCode Go's Responses model (the check keys on the
+  model id), Anthropic `cache_control` blocks become explicit OpenAI cache breakpoints.
+  ChatGPT/Codex OAuth sends a hashed Claude session-derived `prompt_cache_key`
   and strips Claude Code's volatile billing-attribution header from instructions, but omits
   `prompt_cache_options` and explicit breakpoints — those produced successful-but-empty OAuth
   responses in testing.
@@ -30,7 +31,14 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   upstream. The envelope itself is never sent upstream. No process-local registry or provider
   ciphertext rewriting is involved. Legacy raw signatures remain readable. An unknown or malformed
   envelope is omitted, never forwarded as ciphertext; switching a valid envelope to another
-  translated provider retains only the display text. Older clodex builds cannot decode these new
+  translated provider retains only the display text. OpenCode Go and OpenAI both ride
+  `@ai-sdk/openai`, so an envelope streamed on a Go route records `origin: "opencode-go"` and its
+  ciphertext is replayed only to a Go route; OpenAI envelopes carry no origin and are never replayed
+  to Go, nor is any non-envelope signature. Go answers `400 invalid_encrypted_content` to
+  ciphertext it cannot decrypt (measured with garbage, tampered and wrong-id items, not with real
+  OpenAI ciphertext), which would fail every later turn. Builds that read envelopes but predate
+  `origin` ignore it, so a Go Luna transcript resumed on one and switched to OpenAI sends Go
+  ciphertext to OpenAI. Older clodex builds cannot decode these new
   signatures and would forward the envelope as provider ciphertext, which can cause upstream errors.
   Resume such transcripts with an envelope-aware build rather than downgrading the bridge. This does not
   change non-streaming responses' existing omission of reasoning, or the transport's prohibition
@@ -88,8 +96,9 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   schema. And OpenAI **does** reject lookaround outright on its strict
   structured-output path (`vercel/ai#16021`, `SmartBear/smartbear-mcp#491` — reports, not verified
   here; the vercel maintainers could not reproduce it synthetically). clodex does not meet that
-  path: `translateTools` sends `strict: false` on `@ai-sdk/openai`, covering both OpenAI routes, and
-  `@ai-sdk/openai-compatible` (OpenCode Go) goes to Chat Completions, non-strict by default. The
+  path: `translateTools` sends `strict: false` on `@ai-sdk/openai`, covering both OpenAI routes and
+  OpenCode Go's Responses model, and `@ai-sdk/openai-compatible` (the rest of OpenCode Go) goes to
+  Chat Completions, non-strict by default. The
   explicit opt-out is load-bearing for keeping Artifact's `collection` lookahead in the payload — if
   it is ever removed, lookaround must be stripped here too.
 - **Images in `tool_result` are lifted out of the text-only function-output channel** and delivered

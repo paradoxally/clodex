@@ -443,7 +443,8 @@ describe('fetchTemplateModels fixed OpenCode Go destination', () => {
   it.each([
     ['@ai-sdk/openai-compatible', OPENCODE_GO_ANTHROPIC_BASE_URL],
     ['@ai-sdk/anthropic', OPENCODE_GO_COMPLETIONS_BASE_URL],
-    ['@ai-sdk/openai', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['@ai-sdk/openai', OPENCODE_GO_ANTHROPIC_BASE_URL],
+    ['@ai-sdk/xai', OPENCODE_GO_COMPLETIONS_BASE_URL],
     ['', OPENCODE_GO_COMPLETIONS_BASE_URL],
   ])('refuses the OpenCode package/destination mismatch %s at %s before fetch', async (npm, url) => {
     const result = await fetchTemplateModels({ ...openCodeGo(), npm }, 'go-key', url);

@@ -19,6 +19,9 @@ export class OpenAiThinkingBlock {
   private readonly parts = new Map<string, ReasoningPart>();
   private hasText = false;
 
+  /** `origin` names a provider whose ciphertext only it can decrypt; unset is OpenAI's own. */
+  constructor(private readonly origin?: string) {}
+
   start(part: FullStreamPart): void {
     const itemId = openAiReasoningItemId(part);
     if (!itemId || !part.id) throw new Error('OpenAI reasoning part has no identity');
@@ -47,7 +50,10 @@ export class OpenAiThinkingBlock {
     // JSON escapes lone surrogates, so request-wide Unicode sanitization cannot
     // change the originals inside this opaque string. Avoid base64-wrapping blobs
     // that are already encoded upstream.
-    return SIGNATURE_V1 + JSON.stringify({ parts: [...this.parts.values()] });
+    return SIGNATURE_V1 + JSON.stringify({
+      parts: [...this.parts.values()],
+      ...(this.origin ? { origin: this.origin } : {}),
+    });
   }
 }
 
@@ -63,12 +69,14 @@ export function restoreOpenAiThinking(
   text: string,
   signature: string | undefined,
   npm: string,
+  origin?: string,
 ): Array<Record<string, unknown>> | undefined {
   if (!signature?.startsWith(SIGNATURE_PREFIX)) return undefined;
   if (!signature.startsWith(SIGNATURE_V1)) return [];
   try {
     const envelope: unknown = JSON.parse(signature.slice(SIGNATURE_V1.length));
     if (!isRecord(envelope) || !Array.isArray(envelope.parts) || envelope.parts.length === 0) return [];
+    if (envelope.origin !== undefined && typeof envelope.origin !== 'string') return [];
     const parts: ReasoningPart[] = [];
     for (const part of envelope.parts) {
       if (!isRecord(part) || typeof part.itemId !== 'string' || !part.itemId
@@ -76,7 +84,10 @@ export function restoreOpenAiThinking(
         || (part.encryptedContent !== undefined && typeof part.encryptedContent !== 'string')) return [];
       parts.push(part as unknown as ReasoningPart);
     }
-    if (npm !== '@ai-sdk/openai') return text ? [{ type: 'reasoning', text }] : [];
+    // Ciphertext only decrypts where it was made: OpenCode Go answers 400
+    // invalid_encrypted_content to items it cannot decrypt, and one such item
+    // fails every later turn of the conversation.
+    if (npm !== '@ai-sdk/openai' || envelope.origin !== origin) return text ? [{ type: 'reasoning', text }] : [];
     return parts.map(part => ({
       type: 'reasoning', text: part.text,
       providerOptions: {

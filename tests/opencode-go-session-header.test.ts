@@ -229,6 +229,44 @@ describe('proxy mode sends x-opencode-session to OpenCode Go', () => {
     }
   });
 
+  // A Responses route shares `@ai-sdk/openai` with OpenAI, and Go rejects OpenAI's
+  // reasoning ciphertext, so the route itself must mark its reasoning as Go's.
+  it('marks reasoning on a Go Responses route as Go\'s, even when the provider id drifted', async () => {
+    const goRoute: ProxyRoute = {
+      aliasId: 'clodex:imported-opencode:gpt-5.6-luna',
+      realModelId: 'gpt-5.6-luna',
+      displayName: 'GPT-5.6 Luna',
+      upstreamUrl: '',
+      apiKey: 'go-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      baseURL: 'https://opencode.ai/zen/go/v1',
+      providerId: 'imported-opencode',
+    };
+    const openAiRoute: ProxyRoute = {
+      ...goRoute,
+      aliasId: 'clodex:openai:gpt-5.6-luna',
+      apiKey: 'sk-openai',
+      baseURL: undefined,
+      providerId: 'openai',
+    };
+    const handle = await startProxyCatalog([goRoute, openAiRoute], goRoute.aliasId, false);
+    try {
+      for (const route of [goRoute, openAiRoute]) {
+        const res = await post(handle.port, '/v1/messages', { model: route.aliasId, ...messagesBody }, {
+          authorization: `Bearer ${handle.token}`,
+          'x-claude-code-session-id': SESSION_ID,
+        });
+        expect(res.status, res.body).toBe(200);
+      }
+      const calls = vi.mocked(generateAnthropicResponse).mock.calls;
+      expect((calls[0]![1] as { reasoningOrigin?: string }).reasoningOrigin).toBe('opencode-go');
+      expect((calls[1]![1] as { reasoningOrigin?: string }).reasoningOrigin).toBeUndefined();
+    } finally {
+      handle.close();
+    }
+  });
+
   it('not on a non-Go SDK route', async () => {
     const route: ProxyRoute = {
       aliasId: 'clodex:kilo:tencent/hy3',
@@ -319,6 +357,33 @@ describe('API server sends x-opencode-session to OpenCode Go', () => {
     expect(generateAnthropicResponse).toHaveBeenCalledOnce();
     const params = vi.mocked(generateAnthropicResponse).mock.calls[0]![1] as { headers?: Record<string, string> };
     expect(params.headers).toEqual({ 'x-opencode-session': SESSION_ID });
+  });
+
+  it('marks reasoning on the Go Responses route as Go\'s', async () => {
+    const server: ServerHandle = await startServer({
+      host: '127.0.0.1',
+      port: 0,
+      apiKey: 'go-key',
+      serverPassword: null,
+      catalog: createGatewayModelCatalog([{
+        id: 'gpt-5.6-luna',
+        name: 'GPT-5.6 Luna',
+        isFree: false,
+        brand: 'Other',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'openai',
+        npm: '@ai-sdk/openai',
+        apiUrl: 'https://opencode.ai/zen/go/v1',
+      }]),
+    });
+    handles.push(server);
+    const res = await post(new URL(server.url).port as unknown as number, '/anthropic/v1/messages', {
+      model: 'gpt-5.6-luna', ...messagesBody,
+    }, { 'x-claude-code-session-id': SESSION_ID });
+    expect(res.status, res.body).toBe(200);
+    const params = vi.mocked(generateAnthropicResponse).mock.calls[0]![1] as { reasoningOrigin?: string };
+    expect(params.reasoningOrigin).toBe('opencode-go');
   });
 
   // /openai/v1/chat/completions is advertised to OpenAI-compatible clients, so it is
