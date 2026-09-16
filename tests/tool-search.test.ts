@@ -63,6 +63,20 @@ describe('extractReferencedToolNames', () => {
     ]);
     expect(names.has('mcp_context7_resolve')).toBe(true);
   });
+
+  it('collects tools a system message announces with tool_addition blocks', () => {
+    const names = extractReferencedToolNames([
+      { role: 'user', content: 'hey' },
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'MCP server connected.' },
+          { type: 'tool_addition', tool: { type: 'tool_reference', name: 'mcp_playwright_click' } },
+        ],
+      },
+    ]);
+    expect([...names]).toEqual(['mcp_playwright_click']);
+  });
 });
 
 describe('resolveUpstreamTools', () => {
@@ -86,5 +100,21 @@ describe('resolveUpstreamTools', () => {
     );
     expect(upstream.map(t => t.name)).toContain('mcp_playwright_click');
     expect(upstream.map(t => t.name)).not.toContain('mcp_context7_resolve');
+  });
+
+  it('includes deferred tools once a tool_addition block announces them', () => {
+    const upstream = resolveUpstreamTools(
+      [...coreTools, ...deferredTools, toolSearchTool],
+      [
+        { role: 'user', content: 'hey' },
+        {
+          role: 'system',
+          content: [
+            { type: 'tool_addition', tool: { type: 'tool_reference', name: 'mcp_context7_resolve' } },
+          ],
+        },
+      ],
+    );
+    expect(upstream.map(t => t.name)).toEqual(['Bash', 'Read', 'mcp_context7_resolve', 'tool_search_tool_regex']);
   });
 });

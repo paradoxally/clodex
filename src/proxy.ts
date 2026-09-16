@@ -60,6 +60,7 @@ import {
 } from './anthropic-endpoints.js';
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
 import { openCodeGoSessionHeaders } from './data/opencode-go-models.js';
+import { anthropicBodyForUpstream } from './third-party-anthropic-body.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
@@ -499,7 +500,10 @@ export async function startProxyCatalog(
 
         const betaHeaderRaw = req.headers['anthropic-beta'];
         const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
-        const forwardBody = { ...anthropicBody, model: route.realModelId };
+        const forwardBody = anthropicBodyForUpstream(
+          { ...anthropicBody, model: route.realModelId },
+          { providerId: route.providerId, baseUrl: upstreamUrl },
+        );
         const targetUrl = `${upstreamUrl}/v1/messages/count_tokens`;
         const isOAuth = routeAuthType === 'oauth';
         try {
@@ -532,7 +536,10 @@ export async function startProxyCatalog(
       if (route.modelFormat === 'anthropic') {
         const betaHeaderRaw = req.headers['anthropic-beta'];
         const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
-        const forwardBody = { ...anthropicBody, model: route.realModelId };
+        const forwardBody = anthropicBodyForUpstream(
+          { ...anthropicBody, model: route.realModelId },
+          { providerId: route.providerId, baseUrl: upstreamUrl },
+        );
         const targetUrl = `${upstreamUrl}/v1/messages`;
         const isOAuth = routeAuthType === 'oauth';
 

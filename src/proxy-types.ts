@@ -74,6 +74,7 @@ export type AnthropicRequestContentPart =
   | { type: 'tool_use'; id: string; name: string; input?: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: unknown }
   | { type: 'tool_reference'; tool_name: string }
+  | { type: 'tool_addition'; tool: { type: 'tool_reference'; name: string } }
   | { type: 'image'; source: AnthropicImageSource };
 
 export type AnthropicImageSource =
