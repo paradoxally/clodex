@@ -11,9 +11,8 @@
 // that honours `defer_loading`: the tools they announced would stay hidden. So
 // each announced tool is sent as an ordinary tool instead, as Claude Code does
 // itself when the API refuses `tool_addition` and no ToolSearch tool is
-// present. OpenCode Go ignores
-// `defer_loading` and exposes deferred tools from the first request, so for it
-// that step changes nothing the model sees.
+// present. OpenCode Go ignores `defer_loading` and exposes deferred tools from
+// the first request, so for it that step changes nothing the model sees.
 
 import { toolAdditionName } from './tool-search.js';
 
