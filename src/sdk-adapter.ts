@@ -29,6 +29,7 @@ import { emitParentNotice } from './parent-notice.js';
 import { CLAUDE_CODE_COMPACT_PROMPT_MARKERS } from './claude-code-compact-prompt.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 import { OpenAiThinkingBlock, openAiReasoningItemId, restoreOpenAiThinking } from './openai-thinking.js';
+import { isOpenCodeGoModel, OPENCODE_GO_PROVIDER_ID } from './data/opencode-go-models.js';
 
 export { silenceSdkWarnings };
 
@@ -204,6 +205,8 @@ export interface SdkCallParams {
   providerOptions?: Record<string, Record<string, unknown>>;
   /** Per-request upstream headers; `streamText`/`generateText` take them as-is. */
   headers?: Record<string, string>;
+  /** Stamped into streamed reasoning signatures; never sent to the SDK. */
+  reasoningOrigin?: string;
 }
 
 // ── system ───────────────────────────────────────────────────────────────────
@@ -330,12 +333,15 @@ export function annotateToolNames(messages: AnthropicMsg[]): void {
 function thinkingToSdkPart(
   block: AnthropicBlock,
   npm: string,
+  reasoningOrigin?: string,
 ): Record<string, unknown> | null {
   const text = block.thinking ?? '';
   if (npm === '@ai-sdk/openai' && !block.signature && !text.trim()) return null;
 
   const part: Record<string, unknown> = { type: 'reasoning', text };
-  if (block.signature) {
+  // A signature that is not the origin's own envelope (a Claude signature, a legacy
+  // raw one) is not ciphertext that origin can decrypt.
+  if (block.signature && !reasoningOrigin) {
     if (npm === '@ai-sdk/google') {
       part.providerOptions = { google: { thoughtSignature: block.signature } };
     } else if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/openai-compatible') {
@@ -350,6 +356,7 @@ export function translateMessages(
   messages: AnthropicMsg[],
   npm: string,
   openAiPromptCacheBreakpoints = false,
+  reasoningOrigin?: string,
 ): ModelMessage[] {
   const isGoogle = npm === '@ai-sdk/google';
   const out: ModelMessage[] = [];
@@ -422,10 +429,10 @@ export function translateMessages(
           // content, not prior assistant output_text items.
           parts.push({ type: 'text', text: b.text ?? '' });
         } else if (b.type === 'thinking') {
-          const restored = restoreOpenAiThinking(b.thinking ?? '', b.signature, npm);
+          const restored = restoreOpenAiThinking(b.thinking ?? '', b.signature, npm, reasoningOrigin);
           if (restored) parts.push(...restored);
           else {
-            const part = thinkingToSdkPart(b, npm);
+            const part = thinkingToSdkPart(b, npm, reasoningOrigin);
             if (part) parts.push(part);
           }
         } else if (b.type === 'tool_use' && b.id) {
@@ -677,6 +684,14 @@ export function translateRequest(
   }
 
   const upstreamModelId = options?.reasoningMetadata?.upstreamModelId ?? body.model;
+  const reasoningOrigin = npm === '@ai-sdk/openai'
+    && options?.reasoningMetadata
+    && isOpenCodeGoModel({
+      providerId: options.reasoningMetadata.providerId,
+      apiBaseUrl: options.reasoningMetadata.apiBaseUrl,
+    })
+    ? OPENCODE_GO_PROVIDER_ID
+    : undefined;
   const supportsExplicitOpenAiCaching = !options?.openAiOAuth
     && supportsOpenAiPromptCacheBreakpoints(upstreamModelId);
 
@@ -707,7 +722,7 @@ export function translateRequest(
     instructions: options?.openAiOAuth || supportsExplicitOpenAiCaching ? undefined : systemText,
     messages: [
       ...(supportsExplicitOpenAiCaching ? translateTopLevelSystemForOpenAi(body.system) : []),
-      ...translateMessages(messages, npm, supportsExplicitOpenAiCaching),
+      ...translateMessages(messages, npm, supportsExplicitOpenAiCaching, reasoningOrigin),
     ],
     allowSystemInMessages: true,
     tools: translateTools(upstreamTools.length ? upstreamTools : undefined, npm),
@@ -715,6 +730,7 @@ export function translateRequest(
     maxOutputTokens: options?.openAiOAuth ? undefined : body.max_tokens,
     temperature: body.temperature,
     providerOptions,
+    ...(reasoningOrigin ? { reasoningOrigin } : {}),
   };
 }
 
@@ -877,6 +893,7 @@ export async function writeAnthropicStream(
   log?: LogFn,
   observer?: AnthropicStreamObserver,
   tools?: SdkCallParams['tools'],
+  reasoningOrigin?: string,
 ): Promise<void> {
   const messageId = 'msg_' + Date.now();
   const requiredProps = toolRequiredProps(tools);
@@ -972,7 +989,7 @@ export async function writeAnthropicStream(
         if (openAiReasoningItemId(part) && part.id) {
           if (!openAiThinking) {
             openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
-            openAiThinking = new OpenAiThinkingBlock();
+            openAiThinking = new OpenAiThinkingBlock(reasoningOrigin);
           }
           openAiThinking.start(part);
         } else {
@@ -1124,6 +1141,7 @@ export async function streamAnthropicResponse(
   log?: LogFn,
   observer?: AnthropicStreamObserver,
 ): Promise<void> {
+  const { reasoningOrigin, ...callParams } = params;
   const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget({
     idleTimeoutMs: observer?.idleTimeoutMs,
   });
@@ -1147,7 +1165,7 @@ export async function streamAnthropicResponse(
   try {
     const result = streamText({
       model: attempts.model,
-      ...params,
+      ...callParams,
       maxRetries,
       abortSignal,
       onError: () => {},
@@ -1166,7 +1184,9 @@ export async function streamAnthropicResponse(
       }
     })();
 
-    await writeAnthropicStream(watchedStream, modelId, write, log, { ...observer, abortSignal }, params.tools);
+    await writeAnthropicStream(
+      watchedStream, modelId, write, log, { ...observer, abortSignal }, params.tools, reasoningOrigin,
+    );
   } finally {
     stopForwardingAbort();
     clearTimeout(idleTimer);
@@ -1190,6 +1210,7 @@ export async function generateAnthropicResponse(
     idleTimeoutMs?: number;
   },
 ): Promise<Record<string, unknown>> {
+  const { reasoningOrigin: _reasoningOrigin, ...callParams } = params;
   let text: string;
   let toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
   let finishReason: string;
@@ -1226,7 +1247,7 @@ export async function generateAnthropicResponse(
     try {
       const r = streamText({
         model: attempts.model,
-        ...params,
+        ...callParams,
         maxRetries,
         abortSignal,
         onError: () => {},
@@ -1283,7 +1304,7 @@ export async function generateAnthropicResponse(
     try {
       const r = await generateText({
         model: attempts.model,
-        ...params,
+        ...callParams,
         maxRetries,
         abortSignal: generateAbort.signal,
       } as Parameters<typeof generateText>[0]);

@@ -17,12 +17,13 @@ import { streamAnthropicResponse, translateRequest } from '../src/sdk-adapter.js
 
 // OpenCode Go serves gpt-5.6-luna only on POST /v1/responses: /v1/chat/completions
 // answers HTTP 500 for it on every request, while the same key and body shape work
-// for its Chat Completions models. These tests replace only `fetch`, so everything
-// from the Anthropic request down to the bytes handed to the network is the real
-// production path.
+// for its Chat Completions models. The wire tests replace only `fetch` below
+// translateRequest and createLanguageModel; the step that turns a proxy or server
+// route into their inputs is covered by the materialize tests, not here.
 
 const SESSION_ID = '7d0f4a52-1c2b-4e8a-9b6f-3c5d2e1f0a9b';
 const LUNA = 'gpt-5.6-luna';
+const GO_CIPHERTEXT = 'go-encrypted-reasoning';
 
 function lunaCatalogEntry() {
   return buildOpenCodeGoModels().find(model => model.id === LUNA)!;
@@ -46,7 +47,7 @@ function toolCallStream(): string {
     { type: 'response.reasoning_summary_part.done', sequence_number: 4, item_id: 'rs_go', summary_index: 0 },
     {
       type: 'response.output_item.done', sequence_number: 5, output_index: 0,
-      item: { id: 'rs_go', type: 'reasoning', encrypted_content: 'go-encrypted-reasoning', summary: [] },
+      item: { id: 'rs_go', type: 'reasoning', encrypted_content: GO_CIPHERTEXT, summary: [] },
     },
     {
       type: 'response.output_item.added', sequence_number: 6, output_index: 1,
@@ -99,28 +100,53 @@ function anthropicSseEvents(chunks: string[]): Array<Record<string, any>> {
   });
 }
 
+/** Rebuilds the assistant content blocks a client would persist from the streamed events. */
+function assistantBlocks(events: Array<Record<string, any>>): Array<Record<string, any>> {
+  const blocks: Array<Record<string, any>> = [];
+  const json = new Map<number, string>();
+  for (const event of events) {
+    if (event.type === 'content_block_start') blocks[event.index] = structuredClone(event.content_block);
+    if (event.type !== 'content_block_delta') continue;
+    const block = blocks[event.index]!;
+    if (event.delta.type === 'thinking_delta') block.thinking += event.delta.thinking;
+    if (event.delta.type === 'signature_delta') block.signature = event.delta.signature;
+    if (event.delta.type === 'input_json_delta') json.set(event.index, (json.get(event.index) ?? '') + event.delta.partial_json);
+  }
+  for (const [index, text] of json) blocks[index]!.input = JSON.parse(text);
+  return blocks;
+}
+
 const bashTool = {
   name: 'Bash',
   description: 'Run a shell command',
   input_schema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
 };
 
-async function runGoLunaTurn(
-  effort: string,
-  spec: Partial<ProviderModelSpec> = {},
-): Promise<{ request: CapturedRequest; events: Array<Record<string, any>> }> {
+const firstUserTurn = { role: 'user', content: 'Run echo hi.' };
+
+function goLunaRoute(spec: Partial<ProviderModelSpec> = {}): ProviderModelSpec {
   const catalog = lunaCatalogEntry();
-  const captured = stubNetwork();
-  const route = {
+  return {
     npm: catalog.npm!,
     modelId: LUNA,
     apiKey: 'go-key',
     baseURL: catalog.apiUrl,
     providerId: 'opencode-go',
-    authType: 'api' as const,
+    authType: 'api',
     compatibility: catalog.compatibility,
     ...spec,
   };
+}
+
+function openAiLunaRoute(): ProviderModelSpec {
+  return { npm: '@ai-sdk/openai', modelId: LUNA, apiKey: 'sk-openai', providerId: 'openai', authType: 'api' };
+}
+
+async function runTurn(
+  route: ProviderModelSpec,
+  { effort = 'high', messages = [firstUserTurn] }: { effort?: string; messages?: unknown[] } = {},
+): Promise<{ request: CapturedRequest; events: Array<Record<string, any>> }> {
+  const captured = stubNetwork();
   const params = translateRequest({
     model: LUNA,
     max_tokens: 2000,
@@ -128,13 +154,13 @@ async function runGoLunaTurn(
     tools: [bashTool],
     output_config: { effort },
     metadata: { user_id: JSON.stringify({ session_id: SESSION_ID }) },
-    messages: [{ role: 'user', content: 'Run echo hi.' }],
+    messages: messages as never,
   }, route.npm, {
     claudeSessionId: SESSION_ID,
     reasoningMetadata: {
       providerId: route.providerId,
       apiBaseUrl: route.baseURL,
-      reasoning: catalog.reasoning,
+      reasoning: true,
       compatibility: route.compatibility,
       upstreamModelId: LUNA,
     },
@@ -148,7 +174,12 @@ async function runGoLunaTurn(
   const written: string[] = [];
   await streamAnthropicResponse(model, params, 'luna', chunk => written.push(chunk), () => {});
   expect(captured).toHaveLength(1);
+  vi.unstubAllGlobals();
   return { request: captured[0]!, events: anthropicSseEvents(written) };
+}
+
+function replayedReasoning(request: CapturedRequest): Array<Record<string, any>> {
+  return (request.body.input as Array<Record<string, any>>).filter(item => item.type === 'reasoning');
 }
 
 afterEach(() => {
@@ -174,8 +205,7 @@ describe('OpenCode Go gpt-5.6-luna catalog entry', () => {
 
   it('carries only the effort ladder, not Chat Completions field quirks', () => {
     // Measured on /v1/responses 2026-09-16: none/low/medium/high/xhigh/max answer
-    // 200, minimal answers 400 unsupported_value, and `store`, the developer role
-    // and `max_output_tokens` are all accepted, so no Chat Completions rewrite applies.
+    // 200 and minimal answers 400 unsupported_value.
     expect(lunaCatalogEntry().compatibility).toEqual({
       reasoningEffortMap: {
         off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
@@ -241,7 +271,7 @@ describe('an installed OpenCode Go provider exposes Luna on the Responses route'
 
 describe('an OpenCode Go Luna turn on the wire', () => {
   it('posts to Go /v1/responses with the Go key and session, and streams the tool call back', async () => {
-    const { request, events } = await runGoLunaTurn('high');
+    const { request, events } = await runTurn(goLunaRoute());
 
     // Spelled out rather than built from a constant: this request carries a live key.
     expect(request.url).toBe('https://opencode.ai/zen/go/v1/responses');
@@ -257,28 +287,81 @@ describe('an OpenCode Go Luna turn on the wire', () => {
     });
     expect(request.body.tools).toEqual([expect.objectContaining({ type: 'function', name: 'Bash', strict: false })]);
 
-    const starts = events.filter(event => event.type === 'content_block_start').map(event => event.content_block);
-    expect(starts.map(block => block.type)).toEqual(['thinking', 'tool_use']);
-    expect(starts[1]).toMatchObject({ name: 'Bash', id: 'call_go' });
-    const toolInput = events
-      .filter(event => event.type === 'content_block_delta' && event.delta.type === 'input_json_delta')
-      .map(event => event.delta.partial_json)
-      .join('');
-    expect(JSON.parse(toolInput)).toEqual({ command: 'echo hi' });
-    const signature = events.find(event => event.type === 'content_block_delta' && event.delta.type === 'signature_delta');
-    expect(signature?.delta.signature).toBeTruthy();
+    const blocks = assistantBlocks(events);
+    expect(blocks.map(block => block.type)).toEqual(['thinking', 'tool_use']);
+    expect(blocks[0]!.signature).toBeTruthy();
+    expect(blocks[1]).toMatchObject({ name: 'Bash', id: 'call_go', input: { command: 'echo hi' } });
     expect(events.find(event => event.type === 'message_delta')?.delta.stop_reason).toBe('tool_use');
   });
 
   it('keeps the Go destination for a retained provider whose id drifted', async () => {
-    const { request } = await runGoLunaTurn('medium', { providerId: 'imported-opencode' });
+    const { request } = await runTurn(goLunaRoute({ providerId: 'imported-opencode' }));
     expect(request.url).toBe('https://opencode.ai/zen/go/v1/responses');
     expect(request.headers.get('x-opencode-session')).toBe(SESSION_ID);
   });
 
+  it('sends a Go route to the reviewed Go address, never to the URL the route carries', async () => {
+    const { request } = await runTurn(goLunaRoute({ baseURL: 'https://gateway.example/v1' }));
+    expect(request.url).toBe('https://opencode.ai/zen/go/v1/responses');
+  });
+
+  it('keeps an anonymous Go route on Go without credentials, and refuses an OAuth-typed one', async () => {
+    const { request } = await runTurn(goLunaRoute({ authType: 'none' }));
+    expect(request.url).toBe('https://opencode.ai/zen/go/v1/responses');
+    expect(request.headers.has('authorization')).toBe(false);
+
+    const transport = vi.fn();
+    vi.stubGlobal('fetch', transport);
+    await expect(createLanguageModel(goLunaRoute({ authType: 'oauth' }))).rejects.toThrow(/OpenCode Go/);
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it('sends effort none for off and never sends minimal', async () => {
-    expect((await runGoLunaTurn('off')).request.body.reasoning).toMatchObject({ effort: 'none' });
-    expect((await runGoLunaTurn('minimal')).request.body.reasoning?.effort).toBeUndefined();
+    expect((await runTurn(goLunaRoute(), { effort: 'off' })).request.body.reasoning).toMatchObject({ effort: 'none' });
+    expect((await runTurn(goLunaRoute(), { effort: 'minimal' })).request.body.reasoning?.effort).toBeUndefined();
+  });
+});
+
+describe('reasoning replay across a model switch', () => {
+  // Go answers 400 invalid_encrypted_content (measured 2026-09-16) to reasoning
+  // ciphertext it did not produce, and that item stays in every later request.
+  async function historyFrom(route: ProviderModelSpec): Promise<unknown[]> {
+    const { events } = await runTurn(route);
+    const blocks = assistantBlocks(events);
+    const toolUse = blocks.find(block => block.type === 'tool_use')!;
+    return [
+      firstUserTurn,
+      { role: 'assistant', content: blocks },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: 'hi' }] },
+    ];
+  }
+
+  it('replays Go reasoning ciphertext to Go and only its text to OpenAI', async () => {
+    const history = await historyFrom(goLunaRoute());
+
+    expect(replayedReasoning((await runTurn(goLunaRoute(), { messages: history })).request))
+      .toEqual([expect.objectContaining({ id: 'rs_go', encrypted_content: GO_CIPHERTEXT })]);
+    expect(JSON.stringify((await runTurn(openAiLunaRoute(), { messages: history })).request.body))
+      .not.toContain(GO_CIPHERTEXT);
+  });
+
+  it('replays OpenAI reasoning ciphertext to OpenAI and never to Go', async () => {
+    const history = await historyFrom(openAiLunaRoute());
+
+    expect(replayedReasoning((await runTurn(openAiLunaRoute(), { messages: history })).request))
+      .toEqual([expect.objectContaining({ id: 'rs_go', encrypted_content: GO_CIPHERTEXT })]);
+    expect(JSON.stringify((await runTurn(goLunaRoute(), { messages: history })).request.body))
+      .not.toContain(GO_CIPHERTEXT);
+  });
+
+  it('never sends a Claude thinking signature to Go as ciphertext', async () => {
+    const history = [
+      firstUserTurn,
+      { role: 'assistant', content: [{ type: 'thinking', thinking: 'Claude reasoning', signature: 'claude-signature' }, { type: 'text', text: 'ok' }] },
+      { role: 'user', content: 'Run echo hi again.' },
+    ];
+    expect(JSON.stringify((await runTurn(goLunaRoute(), { messages: history })).request.body))
+      .not.toContain('claude-signature');
   });
 });
 
@@ -297,18 +380,36 @@ describe('Luna effort control on the Go Responses route', () => {
   });
 });
 
+describe('the OpenCode Go key probe', () => {
+  it('names a Chat Completions model even when a Responses model sorts first', async () => {
+    vi.resetModules();
+    const models = buildOpenCodeGoModels();
+    const luna = models.find(model => model.id === LUNA)!;
+    vi.doMock('../src/data/opencode-go-models.js', async importOriginal => ({
+      ...await importOriginal<typeof import('../src/data/opencode-go-models.js')>(),
+      buildOpenCodeGoModels: () => [luna, ...models.filter(model => model !== luna)],
+    }));
+    try {
+      const { verifyOpenCodeGoCredential } = await import('../src/provider-templates.js');
+      const transport = vi.fn(async () => new Response('{}', { status: 400 }));
+      vi.stubGlobal('fetch', transport);
+      await verifyOpenCodeGoCredential('go-key');
+      const [url, init] = transport.mock.calls[0] as unknown as [string, RequestInit];
+      expect(url).toBe('https://opencode.ai/zen/go/v1/chat/completions');
+      const probed = models.find(model => model.id === JSON.parse(String(init.body)).model);
+      expect(probed?.npm).toBe('@ai-sdk/openai-compatible');
+    } finally {
+      vi.doUnmock('../src/data/opencode-go-models.js');
+      vi.resetModules();
+    }
+  });
+});
+
 describe('OpenAI routes for gpt-5.6-luna stay where they were', () => {
-  it('sends an OpenAI API-key Luna request to api.openai.com, whatever URL the record stores', async () => {
+  it('sends an OpenAI API-key Luna request to api.openai.com for an unset, OpenAI or custom stored URL', async () => {
     for (const baseURL of [undefined, 'https://api.openai.com/v1', 'https://gateway.example/v1']) {
       const captured = stubNetwork();
-      const model = await createLanguageModel({
-        npm: '@ai-sdk/openai',
-        modelId: LUNA,
-        apiKey: 'sk-openai',
-        baseURL,
-        providerId: 'openai',
-        authType: 'api',
-      });
+      const model = await createLanguageModel({ ...openAiLunaRoute(), baseURL });
       const written: string[] = [];
       await streamAnthropicResponse(model, {
         messages: [{ role: 'user', content: 'hi' }],

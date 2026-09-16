@@ -168,6 +168,21 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
     const useResponsesEndpoint = shouldUseOpenAiResponsesEndpoint(modelId);
+    // Decided before the auth branches, which would send a Go credential to
+    // chatgpt.com or a Go conversation to api.openai.com. The destination is the
+    // reviewed literal, not the route's URL.
+    if (isOpenCodeGoModel({ providerId: spec.providerId, apiBaseUrl: baseURL })) {
+      if (spec.authType === 'oauth') {
+        throw new Error('OpenCode Go routes take an API key; refusing an OAuth credential.');
+      }
+      const openai = createOpenAI({
+        apiKey: spec.authType === 'none' ? '' : apiKey,
+        baseURL: OPENCODE_GO_COMPLETIONS_BASE_URL,
+        ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
+        ...(spec.headers ? { headers: spec.headers } : {}),
+      });
+      return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
+    }
     const tokenAccountId = spec.authType === 'oauth'
       ? extractOpenAiAccountId({ access_token: apiKey })?.trim()
       : undefined;
@@ -208,15 +223,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
             ...(spec.headers ? { headers: spec.headers } : {}),
             fetch: fetchWithoutCredentialHeaders,
           }
-        : {
-            apiKey,
-            // Without a baseURL the SDK targets api.openai.com, which would receive
-            // the Go key. The destination is the reviewed literal, not the route's URL.
-            ...(isOpenCodeGoModel({ providerId: spec.providerId, apiBaseUrl: baseURL })
-              ? { baseURL: OPENCODE_GO_COMPLETIONS_BASE_URL }
-              : {}),
-            ...(spec.headers ? { headers: spec.headers } : {}),
-          };
+        : { apiKey, ...(spec.headers ? { headers: spec.headers } : {}) };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }

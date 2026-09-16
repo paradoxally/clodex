@@ -117,8 +117,9 @@ const PATCHES = Object.assign(Object.create(null), {
     // and max answer 200; minimal answers 400 unsupported_value. `store: false`,
     // `include: reasoning.encrypted_content` (and replaying that reasoning next
     // turn), the developer role, `max_output_tokens` and the prompt-cache fields
-    // are all accepted, so none of the Chat Completions field rewrites
-    // (supportsStore, supportsDeveloperRole, maxTokensField) belong here.
+    // are all accepted as the OpenAI SDK sends them. supportsStore,
+    // supportsDeveloperRole and maxTokensField only drive the Chat Completions
+    // body rewrite, which the Responses transport never runs, so they are absent.
     reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
   'hy3': {
