@@ -18,6 +18,7 @@ import {
   transformOpenAiCompatibleRequestBody,
   type ModelRuntimeCompatibility,
 } from './model-runtime-compatibility.js';
+import { isOpenCodeGoModel, OPENCODE_GO_COMPLETIONS_BASE_URL } from './data/opencode-go-models.js';
 
 /** Models that must use /v1/responses instead of /v1/chat/completions. */
 const RESPONSES_ONLY_PREFIXES = [
@@ -207,7 +208,15 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
             ...(spec.headers ? { headers: spec.headers } : {}),
             fetch: fetchWithoutCredentialHeaders,
           }
-        : { apiKey, ...(spec.headers ? { headers: spec.headers } : {}) };
+        : {
+            apiKey,
+            // Without a baseURL the SDK targets api.openai.com, which would receive
+            // the Go key. The destination is the reviewed literal, not the route's URL.
+            ...(isOpenCodeGoModel({ providerId: spec.providerId, apiBaseUrl: baseURL })
+              ? { baseURL: OPENCODE_GO_COMPLETIONS_BASE_URL }
+              : {}),
+            ...(spec.headers ? { headers: spec.headers } : {}),
+          };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }
@@ -1031,6 +1040,13 @@ export function effortProviderOptions(
     if (!reasoningEffort) return undefined;
     const key = metadata.providerId ? toCamelCase(metadata.providerId) : 'openaiCompatible';
     return { [key]: { reasoningEffort } };
+  }
+
+  // A curated ladder describes the gateway in front of the model, which the
+  // OpenAI family rules below do not: OpenCode Go's Luna takes `off` as `none`.
+  if (npm === '@ai-sdk/openai' && modelId && metadata?.compatibility) {
+    const reasoningEffort = compatibilityReasoningEffort(effort, modelId, metadata.compatibility);
+    return reasoningEffort ? { openai: { reasoningEffort, forceReasoning: true } } : undefined;
   }
 
   if (isOpenRouterRoute(npm, metadata)) {

@@ -88,8 +88,9 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   schema. And OpenAI **does** reject lookaround outright on its strict
   structured-output path (`vercel/ai#16021`, `SmartBear/smartbear-mcp#491` — reports, not verified
   here; the vercel maintainers could not reproduce it synthetically). clodex does not meet that
-  path: `translateTools` sends `strict: false` on `@ai-sdk/openai`, covering both OpenAI routes, and
-  `@ai-sdk/openai-compatible` (OpenCode Go) goes to Chat Completions, non-strict by default. The
+  path: `translateTools` sends `strict: false` on `@ai-sdk/openai`, covering both OpenAI routes and
+  OpenCode Go's Responses model, and `@ai-sdk/openai-compatible` (the rest of OpenCode Go) goes to
+  Chat Completions, non-strict by default. The
   explicit opt-out is load-bearing for keeping Artifact's `collection` lookahead in the payload — if
   it is ever removed, lookaround must be stripped here too.
 - **Images in `tool_result` are lifted out of the text-only function-output channel** and delivered

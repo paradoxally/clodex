@@ -29,12 +29,12 @@ const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 
 // models.dev does not publish per-model wire transport, and the family-level
 // summary in the Zen docs is not reliable per model (minimax-m3 is
-// Anthropic-format while minimax-m2.x are Chat Completions; gpt-5.6-luna rides
-// Chat Completions, not Responses). This map is clodex's live-validated
-// routing knowledge: catalog entries only exist for ids mapped here. A new
-// model on models.dev surfaces in the updater's "unmapped" report and is added
-// once its transport is verified against the live endpoint. Responses-only
-// models (grok, mainline gpt) are deliberately absent.
+// Anthropic-format while minimax-m2.x are Chat Completions). This map is
+// clodex's live-validated routing knowledge: catalog entries only exist for ids
+// mapped here. A new model on models.dev surfaces in the updater's "unmapped"
+// report and is added once its transport is verified against the live
+// endpoint. The other Responses models (grok, mainline gpt) are absent until
+// they are verified the same way.
 const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-flash': 'openai-completions',
   // Measured 2026-09-11: V4.1 Flash answers on /v1/messages (thinking block + text).
@@ -42,7 +42,9 @@ const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-pro': 'openai-completions',
   'glm-5.1': 'openai-completions',
   'glm-5.2': 'openai-completions',
-  'gpt-5.6-luna': 'openai-completions',
+  // Measured 2026-09-16: /v1/chat/completions answers HTTP 500 for every
+  // request, /v1/responses answers 200 — including streamed tool calls.
+  'gpt-5.6-luna': 'openai-responses',
   'hy3': 'openai-completions',
   'kimi-k2.6': 'openai-completions',
   'kimi-k2.7-code': 'openai-completions',
@@ -109,12 +111,15 @@ const PATCHES = Object.assign(Object.create(null), {
   'gpt-5.6-luna': {
     // models.dev publishes effort=none/low/medium/high/xhigh/max for OpenCode's
     // Luna — note: no `minimal`. Distinct from the ChatGPT-OAuth Luna, which is
-    // a different deployment on the Responses transport and says nothing about
-    // what this gateway accepts.
+    // a different deployment and says nothing about what this gateway accepts.
+    //
+    // Measured on Go's /v1/responses 2026-09-16: none, low, medium, high, xhigh
+    // and max answer 200; minimal answers 400 unsupported_value. `store: false`,
+    // `include: reasoning.encrypted_content` (and replaying that reasoning next
+    // turn), the developer role, `max_output_tokens` and the prompt-cache fields
+    // are all accepted, so none of the Chat Completions field rewrites
+    // (supportsStore, supportsDeveloperRole, maxTokensField) belong here.
     reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
   },
   'hy3': {
     reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: null },
@@ -330,6 +335,8 @@ function toClodexModel(id, devModel) {
     : PATCHES[id];
   const modalities = (devModel.modalities?.input ?? ['text'])
     .filter(value => value === 'text' || value === 'image');
+  // Chat Completions and Responses share the /v1 base; the SDK package picks the path.
+  const openAiNpm = transport === 'openai-responses' ? '@ai-sdk/openai' : '@ai-sdk/openai-compatible';
 
   return {
     id,
@@ -337,7 +344,7 @@ function toClodexModel(id, devModel) {
     contextWindow: devModel.limit?.context,
     cost,
     modelFormat: anthropic ? 'anthropic' : 'openai',
-    npm: anthropic ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible',
+    npm: anthropic ? '@ai-sdk/anthropic' : openAiNpm,
     apiUrl: anthropic ? ANTHROPIC_BASE_URL : COMPLETIONS_BASE_URL,
     reasoning: devModel.reasoning === true,
     modalities,

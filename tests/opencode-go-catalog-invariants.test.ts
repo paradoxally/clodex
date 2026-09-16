@@ -34,7 +34,7 @@ describe('opencode-go catalog invariants', () => {
         expect(model.apiUrl, model.id).toBe('https://opencode.ai/zen/go');
       } else {
         expect(model.modelFormat, model.id).toBe('openai');
-        expect(model.npm, model.id).toBe('@ai-sdk/openai-compatible');
+        expect(['@ai-sdk/openai-compatible', '@ai-sdk/openai'], model.id).toContain(model.npm);
         expect(model.apiUrl, model.id).toBe('https://opencode.ai/zen/go/v1');
       }
     }
@@ -143,8 +143,16 @@ describe('opencode-go catalog invariants', () => {
       }
       const regenerated = JSON.parse(
         readFileSync(join(workspace, 'src', 'data', 'opencode-go-models.json'), 'utf8'),
-      ) as Array<{ id: string }>;
+      ) as Array<{ id: string; npm: string; apiUrl: string; modelFormat: string }>;
       expect(regenerated.map(model => model.id).sort()).toEqual([...mappedIds].sort());
+      // The generator, not a hand edit, decides each entry's transport.
+      const committed = new Map(models.map(model => [model.id, model]));
+      for (const model of regenerated) {
+        const { npm, apiUrl, modelFormat } = committed.get(model.id)!;
+        expect({ npm: model.npm, apiUrl: model.apiUrl, modelFormat: model.modelFormat }, model.id)
+          .toEqual({ npm, apiUrl, modelFormat });
+      }
+      expect(regenerated.find(model => model.id === 'gpt-5.6-luna')?.npm).toBe('@ai-sdk/openai');
       for (const hostileName of hostileNames) {
         expect(regenerated.some(model => model.id === hostileName)).toBe(false);
       }
