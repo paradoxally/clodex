@@ -524,15 +524,30 @@ tweakcc's own repack reads back as an ordinary module name.
   bug — the MITM layer resolves short alias names as request model ids and echoes bodies unrewritten,
   so *name in enum == name sent == name echoed == context-map key*. The map keeps the canonical id
   as an extra key so pre-alias lookups still hit.
-- Picker/description text uses the canonical label from `httpProxyDisplayName()`
-  (`src/http-proxy/routes.ts`, built on `formatModelLabel`) — the same string `clodex server` prints
-  at startup and `clodex models --list` shows, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. Missing label
-  → the old `Custom model (<id>)` wording.
+- **A `/model` picker row (PATCH 5) is titled with the model's own name, not the alias.** The title
+  is `formatModelLabel` (`GPT-5.6 Sol`) and the description is `<provider name> · /model <alias>`
+  (`OpenAI (ChatGPT) · /model sol`), carried as the entry's `name` and `provider`. Claude Code
+  reuses the row title in its own strings — `Effort not supported for <title>` — and a
+  `modelPicker` option `label` in `~/.claude/settings.json` does not override it (2.1.273: that
+  label reaches the startup banner while the row kept clodex's title). An entry with no `name` —
+  a favorite whose model is missing from the registry cache — gets the title-cased alias over
+  `Custom model (<id>)`. The Agent tool description (PATCH 4) uses the full label from
+  `httpProxyDisplayName()` (`src/http-proxy/routes.ts`), the same string `clodex server` prints at
+  startup and `clodex models --list` shows. `modelPickerOption` builds the row for both the
+  transform and its built-in proof.
+- **Text injected into a string literal must be ASCII.** All 1,790 JavaScript modules of the
+  darwin-arm64 2.1.273 build carry the same module encoding byte (`1`), and a raw `·` in the picker
+  row rendered as `Â·` in the real picker — its UTF-8 bytes read as Latin-1. `modelPickerOption`
+  writes non-ASCII as `\u` escapes, which is also how Claude Code's own bundle spells it (1,789 of
+  those 1,790 modules are pure ASCII). PATCH 4 still splices display text raw, so a non-ASCII model
+  or provider name should reach the Agent tool description garbled too; that is inferred, not
+  observed.
 - `buildDesiredPatchConfig()` is disk-only (preferences + registry models cache — no network, no
   credentials).
 - `computePatchConfigHash` = sha256 of `[PATCH_TRANSFORMS_VERSION, key-sorted [key, alias??null,
-  context??null, display??null, effort-levels??null, default-effort??null] array]`, plus the
-  versioned local-module content identity only while local patches are enabled. Disabled users
+  context??null, display??null, effort-levels??null, default-effort??null, name??null,
+  provider??null] array]`, plus the versioned local-module content identity only while local
+  patches are enabled. Disabled users
   retain the exact historical hash shape. The manifest at `~/.clodex/patch-state.json` (binary path,
   claude version, config hash, patched size/sha256, backup path, pristine sha256 — the last absent
   in pre-content-addressed manifests) drives `evaluatePatchState` →

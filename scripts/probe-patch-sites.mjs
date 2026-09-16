@@ -34,6 +34,8 @@ export const PROBE_PATCH_CONFIG = Object.freeze({
     alias: 'clodexprobecanary',
     context: 272000,
     display: 'clodex probe (synthetic model, not a real one)',
+    name: 'clodex probe',
+    provider: 'synthetic model, not a real one',
     effort: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultLevel: 'high' },
   },
 });

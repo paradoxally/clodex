@@ -1,6 +1,8 @@
-import type {
-  PatchScriptModelConfig,
-  PatchSiteResult,
+import {
+  modelPickerOption,
+  type PatchScriptModelConfig,
+  type PatchScriptModelEntry,
+  type PatchSiteResult,
 } from './patch-transforms.js';
 
 export interface BuiltInPatchProof {
@@ -70,18 +72,15 @@ function protectsResult(results: PatchSiteResult[], name: string): boolean {
 function configuredAliases(config: PatchScriptModelConfig): Array<{
   alias: string;
   id: string;
-  display?: string;
+  entry: PatchScriptModelEntry;
 }> {
-  const aliases = new Map<string, { id: string; display?: string }>();
+  const aliases = new Map<string, { id: string; entry: PatchScriptModelEntry }>();
   for (const [id, entry] of Object.entries(config)) {
     if (entry.alias === undefined) continue;
     const alias = String(entry.alias).trim().toLowerCase();
-    aliases.set(alias, {
-      id,
-      ...(entry.display === undefined ? {} : { display: String(entry.display) }),
-    });
+    aliases.set(alias, { id, entry });
   }
-  return [...aliases].map(([alias, entry]) => ({ alias, ...entry }));
+  return [...aliases].map(([alias, value]) => ({ alias, ...value }));
 }
 
 function effortProofPattern(marker: string): RegExp {
@@ -134,14 +133,11 @@ export function captureBuiltInPatchProofs(
     }
   }
   if (protectsResult(results, 'PATCH 5: model picker options')) {
-    for (const { alias, id, display } of aliases) {
-      const entry = '{value:' + JSON.stringify(alias)
-        + ',label:' + JSON.stringify(alias.charAt(0).toUpperCase() + alias.slice(1))
-        + ',description:' + JSON.stringify(display ?? `Custom model (${id})`) + '}';
+    for (const { alias, id, entry } of aliases) {
       proofs.push(captureNeedle(
         source,
         `PATCH 5: model picker options (${alias})`,
-        entry,
+        modelPickerOption(alias, id, entry),
       ));
     }
   }

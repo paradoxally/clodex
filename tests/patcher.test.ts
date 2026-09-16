@@ -93,6 +93,8 @@ describe('buildPatchModelConfig', () => {
     ['openai-oauth:gpt-5.6-sol', {
       contextWindow: 272_000,
       displayName: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      modelName: 'GPT-5.6 Sol',
+      providerName: 'OpenAI (ChatGPT)',
       effort: {
         levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
         defaultLevel: 'medium',
@@ -133,6 +135,8 @@ describe('buildPatchModelConfig', () => {
       alias: 'sol',
       context: 272_000,
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      name: 'GPT-5.6 Sol',
+      provider: 'OpenAI (ChatGPT)',
       effort: {
         levels: ['low', 'medium', 'high', 'xhigh', 'max'],
         defaultLevel: 'high',
@@ -165,7 +169,7 @@ describe('buildPatchModelConfig', () => {
     const { config } = buildPatchModelConfig(
       [{ providerId: 'openai', modelId: 'davinci-002' }],
       [],
-      () => ({ contextWindow: 272_000, displayName: '   ' }),
+      () => ({ contextWindow: 272_000, displayName: '   ', modelName: ' ', providerName: '  ' }),
     );
     expect(config['clodex:openai:davinci-002']).toEqual({ context: 272_000 });
   });
@@ -398,6 +402,71 @@ describe('buildDesiredPatchConfig', () => {
     expect(readFileSync(join(home, 'providers.json'), 'utf8')).toBe(providersBefore);
   });
 
+  it('titles every provider\'s /model picker rows with the model name, not the alias', () => {
+    const provider = (entry: Record<string, unknown>, models: Array<Record<string, unknown>>) => ({
+      enabled: true,
+      modelsCache: { fetchedAt: '2026-09-16T00:00:00.000Z', models },
+      addedAt: '2026-09-16T00:00:00.000Z',
+      ...entry,
+    });
+    const aliases = [
+      { name: 'deepseek', providerId: 'opencode-go', modelId: 'deepseek-v4.1-flash' },
+      { name: 'luna', providerId: 'opencode-go', modelId: 'gpt-5.6-luna' },
+      { name: 'five', providerId: 'openai', modelId: 'gpt-5.5' },
+      { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    ];
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: aliases.map(({ providerId, modelId }) => ({ providerId, modelId })),
+      modelAliases: aliases,
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [
+        provider({
+          id: 'opencode-go',
+          templateId: 'opencode-go',
+          name: 'OpenCode Go',
+          authRef: 'keyring:provider:opencode-go',
+          authType: 'api',
+          api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        }, [
+          { id: 'deepseek-v4.1-flash', upstreamModelId: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', modelFormat: 'openai' },
+          { id: 'gpt-5.6-luna', upstreamModelId: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', modelFormat: 'openai' },
+        ]),
+        provider({
+          id: 'openai',
+          templateId: 'openai',
+          name: 'OpenAI',
+          authRef: 'env:OPENAI_API_KEY',
+          api: { npm: '@ai-sdk/openai' },
+        }, [
+          { id: 'gpt-5.5', upstreamModelId: 'gpt-5.5', name: 'gpt-5.5', contextWindow: 272_000, modelFormat: 'openai' },
+        ]),
+        provider({
+          id: 'openai-oauth',
+          templateId: 'openai-oauth',
+          name: 'OpenAI (ChatGPT)',
+          authRef: 'keyring:provider:openai-oauth',
+          authType: 'oauth',
+          api: { npm: '@ai-sdk/openai' },
+        }, [
+          { id: 'gpt-5.6-sol', upstreamModelId: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', modelFormat: 'openai' },
+        ]),
+      ],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    const patched = applyClodexPatches(CLAUDE_FIXTURE, desired.config);
+
+    expect(patched.results.find(site => site.name.startsWith('PATCH 5'))?.status).toBe('OK');
+    expect(executePickerOptions(patched.content).slice(1)).toEqual([
+      { value: 'deepseek', label: 'DeepSeek V4.1 Flash', description: 'OpenCode Go · /model deepseek' },
+      { value: 'luna', label: 'GPT-5.6 Luna', description: 'OpenCode Go · /model luna' },
+      { value: 'five', label: 'GPT-5.5', description: 'OpenAI · /model five' },
+      { value: 'sol', label: 'GPT-5.6 Sol', description: 'OpenAI (ChatGPT) · /model sol' },
+    ]);
+  });
+
   it('preserves the native high default when provider metadata defaults to medium', () => {
     writeInputs({
       id: 'gpt-5.6-sol',
@@ -532,6 +601,16 @@ describe('computePatchConfigHash', () => {
       }),
     );
   });
+  it('changes when only the picker row name or provider changes', () => {
+    const base = { 'clodex:p:m1': { alias: 'x', name: 'M One', provider: 'P' } };
+    expect(computePatchConfigHash(base)).not.toBe(
+      computePatchConfigHash({ 'clodex:p:m1': { alias: 'x', name: 'M 1', provider: 'P' } }),
+    );
+    expect(computePatchConfigHash(base)).not.toBe(
+      computePatchConfigHash({ 'clodex:p:m1': { alias: 'x', name: 'M One', provider: 'Q' } }),
+    );
+  });
+
   it('differs from the legacy model-config-only hash', () => {
     const config = { 'clodex:p:m1': { alias: 'x', context: 1000, display: 'M One (P)' } };
     expect(computePatchConfigHash(config)).not.toBe(computeLegacyPatchConfigHash(config));
@@ -588,8 +667,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 12,
-      digest: 'd9dff2594fc60dcae83fb34846c681ee75fb3b0d7f49e5c26cb1c3c415cbcc4c',
+      version: 13,
+      digest: '05ac98099ff75b412b2edebeb193d1d50859523f91936b384d41a78415c3eff8',
     });
   });
 });
@@ -1589,6 +1668,13 @@ function executeDefaultEffort(
  * exactly where a hardcoded name becomes a ReferenceError inside the picker.
  */
 function executePicker(source: string, functionName = 'opts'): string[] {
+  return executePickerOptions(source, functionName).map(option => option.value);
+}
+
+function executePickerOptions(
+  source: string,
+  functionName = 'opts',
+): Array<{ value: string; label?: string; description?: string }> {
   // Sliced by brace matching, not by line prefix: the decoy fixture puts a second
   // function on the same line as the real one.
   const start = source.indexOf(`function ${functionName}(`);
@@ -1609,7 +1695,7 @@ function executePicker(source: string, functionName = 'opts'): string[] {
     () => 'opus',
     (options: { value: string }[], name: string) => options.push({ value: name }),
   ) as (options: { value: string }[], ctx: unknown, current: unknown) => { value: string }[];
-  return build([], 'ctx', 'opus').map(option => option.value);
+  return build([], 'ctx', 'opus');
 }
 
 const CAPABILITY_GATES: Array<{
@@ -1627,6 +1713,8 @@ describe('patch script identity naming', () => {
       alias: 'sol',
       context: 272_000,
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      name: 'GPT-5.6 Sol',
+      provider: 'OpenAI (ChatGPT)',
       effort: {
         levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
         defaultLevel: 'medium',
@@ -2714,12 +2802,43 @@ describe('patch script identity naming', () => {
     }
   });
 
-  it('uses the real display label in the /model picker and the Agent tool description', () => {
+  it('titles the /model picker row with the model name and keeps provider and alias in its description', () => {
     const out = runPatchScript(config);
-    expect(out).toContain('{value:"sol",label:"Sol",description:"GPT-5.6 Sol (OpenAI (ChatGPT))"}');
+    expect(out).toContain('{value:"sol",label:"GPT-5.6 Sol",description:"OpenAI (ChatGPT) \\u00b7 /model sol"}');
+    expect(out).not.toContain('label:"Sol"');
     expect(out).not.toContain('Custom model (');
     expect(out).toContain('Additional custom models: sol = GPT-5.6 Sol (OpenAI (ChatGPT)); '
       + 'clodex:openai:mystery = Mystery (OpenAI).');
+  });
+
+  it('hands the patched picker a row whose value is still the alias', () => {
+    const options = executePickerOptions(runPatchScript(config));
+    expect(options).toEqual([
+      { value: 'opus' },
+      { value: 'sol', label: 'GPT-5.6 Sol', description: 'OpenAI (ChatGPT) · /model sol' },
+    ]);
+  });
+
+  it('writes the row as pure ASCII so Latin-1 module decoding cannot garble it', () => {
+    const name = 'Modèle Ünïcode 😀';
+    const provider = 'Fournisseur Été';
+    const out = runPatchScript({ 'clodex:p:m': { alias: 'sol', name, provider } });
+    const row = /\{value:"sol",[^}]*\}/.exec(out)?.[0];
+
+    expect(row).toBeDefined();
+    expect(row).not.toMatch(/[^\x00-\x7f]/);
+    expect(executePickerOptions(out)).toContainEqual({
+      value: 'sol',
+      label: name,
+      description: `${provider} · /model sol`,
+    });
+  });
+
+  it('describes the row by its alias alone when no provider name is known', () => {
+    const out = runPatchScript({
+      'clodex:openai-oauth:gpt-5.6-sol': { alias: 'sol', name: 'GPT-5.6 Sol' },
+    });
+    expect(out).toContain('{value:"sol",label:"GPT-5.6 Sol",description:"/model sol"}');
   });
 
   it('falls back to the old "Custom model (id)" description when no label is known', () => {
@@ -2820,7 +2939,7 @@ describe('patch script identity naming', () => {
       name: 'PATCH 5: model picker options',
       extra: 'model selection appears 2 times (expected 1)',
     });
-    expect(result.content, 'nothing was injected').not.toContain('{value:"sol",label:"Sol"');
+    expect(result.content, 'nothing was injected').not.toContain('{value:"sol",');
     expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_SELECTING);
   });
 
@@ -2831,7 +2950,7 @@ describe('patch script identity naming', () => {
     const result = applyClodexPatches(CLAUDE_FIXTURE_GENERIC_DECOY, config);
 
     expect(pickerSite(result)?.status).toBe('OK');
-    expect(result.content.match(/\{value:"sol",label:"Sol"/g)).toHaveLength(1);
+    expect(result.content.match(/\{value:"sol",/g)).toHaveLength(1);
     expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_GENERIC);
     expect(executePicker(result.content)).toContain('sol');
     expect(executePicker(result.content, 'zzGeneric'), 'the competitor gained no entries')
@@ -2850,7 +2969,7 @@ describe('patch script identity naming', () => {
       name: 'PATCH 5: model picker options',
       extra: 'anchor not found',
     });
-    expect(result.content).not.toContain('{value:"sol",label:"Sol"');
+    expect(result.content).not.toContain('{value:"sol",');
     expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_GENERIC);
   });
 
@@ -2878,7 +2997,7 @@ describe('patch script identity naming', () => {
       name: 'PATCH 5: model picker options',
       extra: 'anchor not found',
     });
-    expect(result.content).not.toContain('{value:"sol",label:"Sol"');
+    expect(result.content).not.toContain('{value:"sol",');
   });
 
   it('supports aliases that match object prototype property names', () => {
@@ -2891,7 +3010,8 @@ describe('patch script identity naming', () => {
     });
 
     expect(out).toContain('case"constructor":return "constructor";');
-    expect(out).toContain('{value:"constructor",label:"Constructor",description:"Model"}');
+    expect(out).toContain('{value:"constructor",label:"Constructor",description:"Custom model (clodex:openai:model)"}');
+    expect(out).toContain('Additional custom models: constructor = Model.');
   });
 
   it('splices the model list at the template\'s real close even when it holds an escaped backtick', () => {
@@ -2966,6 +3086,10 @@ describe('patch script identity naming', () => {
     expect(builtInPatchProofsChanged(patched.content, proofs)).toBe(false);
     expect(builtInPatchProofsChanged(
       patched.content.replace('"fable","sol"', '"sol"'),
+      proofs,
+    )).toBe(true);
+    expect(builtInPatchProofsChanged(
+      patched.content.replace('label:"GPT-5.6 Sol"', 'label:"Sol"'),
       proofs,
     )).toBe(true);
   });
