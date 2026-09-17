@@ -24,11 +24,17 @@ import { isOpenCodeGoModel } from '../data/opencode-go-models.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
 import { replaceClaudeQuotaHeaders } from '../anthropic-quota-header-filter.js';
-import { getOpenCodeGoLimitHeaders } from '../opencode-go-usage.js';
+import {
+  getOpenCodeGoLimitHeaders,
+  hasOpenCodeGoWindowReading,
+  refreshOpenCodeGoUsage,
+} from '../opencode-go-usage.js';
 import { recordSessionModel, sessionUsesOpenCodeGo } from '../opencode-go-session.js';
 import { isOpenAiOAuthRoute, oauthServiceTier } from '../sdk-adapter.js';
 import {
   getLatestMessagePreview,
+  getProxyDebugLogPath,
+  writeSecureLogLine,
   INFERENCE_PROGRESS_INTERVAL_MS,
   writeInferenceRequestLog,
   writeInferenceRouteUnavailableLog,
@@ -982,6 +988,14 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       baseUrl: route.upstreamUrl,
     }))
     ?.apiKey;
+  // Pre-warmed the way `startProxyCatalog` and `startServer` pre-warm it, so the
+  // first Go session after a restart does not have to wait a refresh round trip
+  // before Go's numbers exist. This is latency, not correctness: the substitution
+  // below refuses an empty reading either way.
+  const goUsageLog = options.debug
+    ? (message: string) => writeSecureLogLine(getProxyDebugLogPath(), message)
+    : undefined;
+  if (openCodeGoApiKey) void refreshOpenCodeGoUsage(openCodeGoApiKey, goUsageLog);
 
   const mitmServer = https.createServer({
     key: certificates.serverKey,
@@ -1051,11 +1065,19 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       // both retires the Claude warning the client is holding and re-asserts
       // Go's. A routed request never reaches this call — it returns through the
       // adapter above, whose reply already carries the same Go headers.
-      const goQuotaForSession = sessionUsesOpenCodeGo(claudeSessionId) && openCodeGoApiKey
-        ? (rawHeaders: string[]) => replaceClaudeQuotaHeaders(
-            rawHeaders,
-            getOpenCodeGoLimitHeaders(openCodeGoApiKey),
-          )
+      //
+      // The accessor is synchronous and does not wait for the refresh it starts, so
+      // a cold cache — or a failing usage endpoint — yields only an inert `allowed`.
+      // Substituting that would blank the banner instead of correcting it, so the
+      // substitution needs a real window reading; until one arrives the upstream's
+      // own readings stand, which is the pre-fix behaviour and the safe direction.
+      const goQuotaHeaders = openCodeGoApiKey
+        ? getOpenCodeGoLimitHeaders(openCodeGoApiKey, goUsageLog)
+        : undefined;
+      const goQuotaForSession = sessionUsesOpenCodeGo(claudeSessionId)
+        && goQuotaHeaders
+        && hasOpenCodeGoWindowReading(goQuotaHeaders)
+        ? (rawHeaders: string[]) => replaceClaudeQuotaHeaders(rawHeaders, goQuotaHeaders)
         : undefined;
       const unresolvedRoutedModel = !route && requestedModel !== undefined && (
         normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)

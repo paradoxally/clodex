@@ -29,9 +29,8 @@ export function replaceClaudeQuotaHeaders(
   const kept: string[] = [];
   let sawQuota = false;
   for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
-    const name = rawHeaders[i];
-    const value = rawHeaders[i + 1];
-    if (name === undefined || value === undefined) continue;
+    const name = rawHeaders[i]!;
+    const value = rawHeaders[i + 1]!;
     if (name.toLowerCase().startsWith(QUOTA_HEADER_PREFIX)) {
       sawQuota = true;
       continue;

@@ -114,6 +114,20 @@ export function buildOpenCodeGoLimitHeaders(payload: unknown): Record<string, st
   return headers;
 }
 
+/**
+ * Whether a header set carries an actual Go window reading rather than the
+ * `allowed` placeholder returned before the first successful refresh (and after
+ * every failure). `addWindowHeaders` always emits `-utilization` for a window
+ * the endpoint reported, so its presence is the signal that Go's numbers are in
+ * hand; without it a caller substituting these headers would erase the upstream's
+ * readings and show nothing in their place.
+ */
+export function hasOpenCodeGoWindowReading(headers: Record<string, string>): boolean {
+  return Object.keys(headers).some(
+    name => name.startsWith('anthropic-ratelimit-unified-') && name.endsWith('-utilization'),
+  );
+}
+
 function cacheKey(apiKey: string): string {
   return createHash('sha256').update(apiKey).digest('hex');
 }
@@ -198,7 +212,7 @@ function recordUsageFailure(
 ): void {
   usageCache.set(key, {
     fetchedAtMs: Date.now(),
-    headers: existing?.headers ?? { ...ALLOWED_HEADERS },
+    headers: existing?.headers ?? ALLOWED_HEADERS,
     failed: true,
   });
   if (!existing?.failed) log?.(`OpenCode Go usage refresh failed (${reason})`);

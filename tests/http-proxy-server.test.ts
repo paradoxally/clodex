@@ -2645,6 +2645,47 @@ describe('selective HTTP proxy', () => {
       }
     }
 
+    it('leaves the upstream readings alone when Go has no numbers yet', async () => {
+      // `getOpenCodeGoLimitHeaders` is synchronous and never awaits its own refresh,
+      // so a cold cache — the state right after a restart — yields only an inert
+      // `allowed`. Substituting that would blank the banner instead of correcting
+      // it. No usage override is set and the fetch fails, so no reading arrives.
+      delete process.env['CLODEX_TEST_OPENCODE_GO_USAGE'];
+      resetOpenCodeGoUsageCacheForTests();
+      resetOpenCodeGoSessionStateForTests();
+      vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('usage unavailable'); }));
+
+      const goSession = '00000000-0000-4000-8000-00000000000c';
+      const goRoute = {
+        aliasId: 'clodex:opencode-go:deepseek-v4.1-flash[1m]',
+        realModelId: 'deepseek-v4.1-flash',
+        displayName: 'DeepSeek V4.1 Flash (OpenCode Go)',
+        upstreamUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'go-key',
+        modelFormat: 'anthropic' as const,
+        providerId: 'opencode-go',
+      };
+      await passthroughHeaders({
+        logName: 'quota-cold-go-turn.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'main',
+        model: goRoute.aliasId,
+      });
+      const cold = await passthroughHeaders({
+        logName: 'quota-cold-side.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'auxiliary',
+      });
+
+      // Claude's reading survives: a stale Claude number is the status quo, while a
+      // blanked banner would be a new failure of the change's own making.
+      expect(cold.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+      expect(cold.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.98');
+      expect(cold.headers['x-clodex-unrelated']).toBe('kept');
+    }, 30_000);
+
     it('strips them from a Go session, and only then', async () => {
       const goSession = '00000000-0000-4000-8000-00000000000a';
       const claudeSession = '00000000-0000-4000-8000-00000000000b';
