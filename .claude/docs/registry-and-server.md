@@ -59,6 +59,14 @@ on that route. clodex synthesizes nothing on other routes, and the relay forward
 own `anthropic-ratelimit-unified-*` headers on success, so a Claude route keeps Claude's numbers.
 `CLODEX_TEST_OPENCODE_GO_USAGE` stages a reading for testing.
 
+The one exception is a session whose selected model is a Go model. Claude Code's quota manager has one
+reading per process and no model identity, and Claude Code's own background calls are Anthropic
+passthrough traffic, so those responses would hand it the Claude plan's numbers while Go is in use.
+`src/http-proxy/server.ts` tracks the selected model per `x-claude-code-session-id`
+(`src/opencode-go-session.ts`) and, on that passthrough path only, replaces the Claude readings with
+Go's own (`src/anthropic-quota-header-filter.ts`). Go's translated replies are unchanged, and every
+other session is untouched.
+
 Every inference and count_tokens request builds a client-disconnect controller (`watchClientDisconnect`
 in `src/http-utils.ts`, shared with `src/proxy.ts`) and passes its signal to the upstream call — the
 raw relays' `fetch`, and the SDK adapters' `abortSignal`. The controller is aborted at end of life on
