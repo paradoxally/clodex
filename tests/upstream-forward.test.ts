@@ -359,6 +359,73 @@ describe('relayAnthropicMessages responseModelOverride', () => {
     expect(res.headers()['Content-Length']).toBe(String(Buffer.byteLength(res.body())));
   });
 
+  it('adds only the supplied downstream response headers', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ id: 'msg_1', type: 'message', model: 'qwen3.8-max', content: [] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'qwen3.8-max' },
+      'key',
+      false,
+      { responseHeaders: { 'anthropic-ratelimit-unified-status': 'allowed_warning' } },
+    );
+
+    expect(res.headers()['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+    expect(res.headers()['Content-Type']).toBe('application/json');
+  });
+
+  it('forwards the upstream\'s own usage-limit headers and lets synthetic ones win', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ id: 'msg_1', type: 'message', model: 'claude-sonnet-4-5', content: [] }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'anthropic-ratelimit-unified-status': 'allowed',
+          'anthropic-ratelimit-unified-7d-utilization': '0.42',
+          'x-unrelated': 'dropped',
+        },
+      },
+    )));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'claude-sonnet-4-5' },
+      'key',
+      false,
+      // A synthetic header for the same key must replace the upstream's.
+      { responseHeaders: { 'anthropic-ratelimit-unified-status': 'allowed_warning' } },
+    );
+
+    expect(res.headers()['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+    expect(res.headers()['anthropic-ratelimit-unified-7d-utilization']).toBe('0.42');
+    expect(res.headers()['x-unrelated']).toBeUndefined();
+  });
+
+  it('does not add downstream limit headers to a failed upstream response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('rate limited', {
+      status: 429,
+      headers: { 'Content-Type': 'text/plain' },
+    })));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'qwen3.8-max' },
+      'key',
+      false,
+      { responseHeaders: { 'anthropic-ratelimit-unified-status': 'allowed_warning' } },
+    );
+
+    expect(res.status()).toBe(429);
+    expect(res.headers()['anthropic-ratelimit-unified-status']).toBeUndefined();
+  });
+
   it('leaves the JSON body untouched without an override', async () => {
     const raw = JSON.stringify({ id: 'msg_1', type: 'message', model: 'claude-sonnet-4-5', content: [] });
     vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, {
@@ -477,12 +544,16 @@ describe('relayAnthropicMessages streaming', () => {
       { model: 'qwen3.8-max', stream: true },
       'key',
       true,
-      { responseModelOverride: 'clodex:opencode-go:qwen3.8-max[1m]' },
+      {
+        responseModelOverride: 'clodex:opencode-go:qwen3.8-max[1m]',
+        responseHeaders: { 'anthropic-ratelimit-unified-status': 'allowed_warning' },
+      },
     );
     await done;
 
     expect(res.status()).toBe(200);
     expect(res.headers()['Content-Type']).toBe('text/event-stream');
+    expect(res.headers()['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
     const body = res.body();
     // The echo invariant: the client sees back exactly the id it asked for.
     expect(body).toContain('"model":"clodex:opencode-go:qwen3.8-max[1m]"');

@@ -11,6 +11,7 @@ import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from '../src/
 import type { LocalProvider, ModelAlias } from '../src/types.js';
 import { resetCompactPromptDriftWarningsForTests } from '../src/sdk-adapter.js';
 import { installParentNoticeSink } from '../src/parent-notice.js';
+import { OPENCODE_GO_USAGE_URL, resetOpenCodeGoUsageCacheForTests } from '../src/opencode-go-usage.js';
 
 /** POST JSON to a local proxy via node:http (avoids vi.stubGlobal('fetch') interception). */
 function postToProxy(
@@ -173,6 +174,241 @@ describe('SDK anonymous route handling', () => {
       expect(headers.has('x-api-key')).toBe(false);
     } finally {
       handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('adds Go limit headers to routed Anthropic responses', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const route: ProxyRoute = {
+      aliasId: 'clodex:opencode-go:go-anthropic',
+      realModelId: 'deepseek-v4.1-flash',
+      displayName: 'DeepSeek V4.1 Flash',
+      upstreamUrl: 'https://opencode.ai/zen/go',
+      apiKey: 'go-key',
+      modelFormat: 'anthropic',
+      providerId: 'opencode-go',
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response([
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_go","model":"deepseek-v4.1-flash","content":[]}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n'), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })));
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+      expect(response.headers['anthropic-ratelimit-unified-5h-utilization']).toBe('0.94');
+    } finally {
+      handle.close();
+      delete process.env.CLODEX_TEST_OPENCODE_GO_USAGE;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('primes Go usage while starting the proxy catalog', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      if (String(input) === OPENCODE_GO_USAGE_URL) {
+        return new Response(JSON.stringify({
+          usage: {
+            rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+            weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+            monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+          },
+        }), { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const route: ProxyRoute = {
+      aliasId: 'clodex:opencode-go:prime',
+      realModelId: 'deepseek-v4.1-flash',
+      displayName: 'DeepSeek V4.1 Flash',
+      upstreamUrl: 'https://opencode.ai/zen/go',
+      apiKey: 'go-key',
+      modelFormat: 'anthropic',
+      providerId: 'opencode-go',
+    };
+    resetOpenCodeGoUsageCacheForTests();
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+
+    try {
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+        OPENCODE_GO_USAGE_URL,
+        expect.objectContaining({ headers: { Authorization: 'Bearer go-key' } }),
+      ));
+      // The primed reading must reach the next response, not merely be fetched.
+      const primed = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      expect(primed.headers['anthropic-ratelimit-unified-5h-utilization']).toBe('0.94');
+    } finally {
+      handle.close();
+      resetOpenCodeGoUsageCacheForTests();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('adds Go limit headers to translated SDK streams', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const route: ProxyRoute = {
+      aliasId: 'clodex:opencode-go:go-sdk',
+      realModelId: 'deepseek-v4-pro',
+      displayName: 'DeepSeek V4 Pro',
+      upstreamUrl: '',
+      apiKey: 'go-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: 'https://opencode.ai/zen/go/v1',
+      providerId: 'opencode-go',
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response([
+      'data: {"id":"chatcmpl-go","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"chatcmpl-go","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })));
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+      expect(response.headers['anthropic-ratelimit-unified-5h-utilization']).toBe('0.94');
+    } finally {
+      handle.close();
+      delete process.env.CLODEX_TEST_OPENCODE_GO_USAGE;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('adds Go limit headers to non-streaming translated SDK responses', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const route: ProxyRoute = {
+      aliasId: 'clodex:opencode-go:go-sdk-nonstream',
+      realModelId: 'deepseek-v4-pro',
+      displayName: 'DeepSeek V4 Pro',
+      upstreamUrl: '',
+      apiKey: 'go-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: 'https://opencode.ai/zen/go/v1',
+      providerId: 'opencode-go',
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      id: 'chatcmpl-go',
+      object: 'chat.completion',
+      created: 1,
+      model: 'deepseek-v4-pro',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers['anthropic-ratelimit-unified-5h-utilization']).toBe('0.94');
+    } finally {
+      handle.close();
+      delete process.env.CLODEX_TEST_OPENCODE_GO_USAGE;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('leaves non-Go routes without quota headers while the Go override is active', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const goRoute: ProxyRoute = {
+      aliasId: 'clodex:opencode-go:go-passthrough',
+      realModelId: 'deepseek-v4.1-flash',
+      displayName: 'DeepSeek V4.1 Flash',
+      upstreamUrl: 'https://opencode.ai/zen/go',
+      apiKey: 'go-key',
+      modelFormat: 'anthropic',
+      providerId: 'opencode-go',
+    };
+    const otherRoute: ProxyRoute = {
+      aliasId: 'clodex:other:plain-anthropic',
+      realModelId: 'plain-anthropic',
+      displayName: 'Plain Anthropic Server',
+      upstreamUrl: 'https://plain.example',
+      apiKey: 'other-key',
+      modelFormat: 'anthropic',
+      providerId: 'other',
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ id: 'msg_x', type: 'message', model: 'plain-anthropic', content: [] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+    const handle = await startProxyCatalog([goRoute, otherRoute], goRoute.aliasId, false);
+
+    try {
+      const request = (model: string) => postToProxy(handle.port, handle.token, {
+        model,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      const goResponse = await request(goRoute.aliasId);
+      const otherResponse = await request(otherRoute.aliasId);
+
+      expect(goResponse.headers['anthropic-ratelimit-unified-5h-utilization']).toBe('0.94');
+      expect(otherResponse.headers['anthropic-ratelimit-unified-status']).toBeUndefined();
+      expect(otherResponse.headers['anthropic-ratelimit-unified-5h-utilization']).toBeUndefined();
+      expect(otherResponse.headers['anthropic-ratelimit-unified-7d-utilization']).toBeUndefined();
+    } finally {
+      handle.close();
+      delete process.env.CLODEX_TEST_OPENCODE_GO_USAGE;
       vi.unstubAllGlobals();
     }
   });
@@ -1015,6 +1251,13 @@ describe('SDK translated error logging', () => {
   });
 
   it('preserves a pre-stream HTTP failure and logs the AI SDK response body', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 12, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 20, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 94, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
     const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-error-'));
     const inferenceLogPath = join(dir, 'inference.jsonl');
     const previousRequestPreview = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
@@ -1040,7 +1283,7 @@ describe('SDK translated error logging', () => {
       modelFormat: 'openai',
       npm: '@ai-sdk/openai-compatible',
       baseURL: `http://127.0.0.1:${address.port}/v1`,
-      providerId: 'test-provider',
+      providerId: 'opencode-go',
     };
     const handle = await startProxyCatalog([route], route.aliasId, false, inferenceLogPath);
 
@@ -1054,6 +1297,8 @@ describe('SDK translated error logging', () => {
 
       expect(res.status).toBe(400);
       expect(res.headers['retry-after']).toBeUndefined();
+      expect(res.headers['anthropic-ratelimit-unified-status']).toBeUndefined();
+      expect(res.headers['anthropic-ratelimit-unified-representative-claim']).toBeUndefined();
       expect(res.body).toContain('translated request rejected');
       const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const errorEntry = entries.find(entry => entry.event === 'upstream_error');
@@ -1061,7 +1306,7 @@ describe('SDK translated error logging', () => {
         event: 'upstream_error',
         requestId: 'req-error-1',
         modelId: route.aliasId,
-        provider: 'test-provider',
+        provider: 'opencode-go',
         route: 'translated',
         statusCode: 400,
         isRetryable: false,
@@ -1088,6 +1333,7 @@ describe('SDK translated error logging', () => {
       else process.env['CLODEX_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
       handle.close();
       await new Promise<void>(resolve => upstream.close(() => resolve()));
+      delete process.env.CLODEX_TEST_OPENCODE_GO_USAGE;
       rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);

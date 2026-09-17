@@ -16,6 +16,7 @@ import { installParentNoticeSink } from '../src/parent-notice.js';
 import { generateOpenAiResponse, streamOpenAiResponse } from '../src/openai-adapter.js';
 import { resolveProviderCredential } from '../src/env.js';
 import { clientDisconnected, ResponseCompleted } from '../src/http-utils.js';
+import { OPENCODE_GO_USAGE_URL, resetOpenCodeGoUsageCacheForTests } from '../src/opencode-go-usage.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:oauth-provider`;
 
@@ -197,6 +198,7 @@ async function closeHandle(handle: ServerHandle | { close: () => Promise<void> }
 }
 
 afterEach(async () => {
+  delete process.env.CLODEX_TEST_OPENCODE_GO_USAGE;
   vi.mocked(createLanguageModel).mockClear();
   vi.mocked(resolveProviderCredential).mockReset();
   vi.mocked(generateAnthropicResponse).mockClear();
@@ -450,6 +452,143 @@ describe('server router', () => {
       authorization: 'Bearer real-opencode-key',
       body: { model: 'claude-native', messages: [{ role: 'user', content: 'hi' }] },
     });
+    expect(response.headers.get('anthropic-ratelimit-unified-status')).toBeNull();
+  });
+
+  it('primes Go usage when the endpoint server starts', async () => {
+    const originalFetch = globalThis.fetch;
+    const usageFetch = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input) === OPENCODE_GO_USAGE_URL) {
+        usageFetch(input, init);
+        return new Response(JSON.stringify({
+          usage: {
+            rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+            weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+            monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+          },
+        }), { status: 200 });
+      }
+      return originalFetch(input, init);
+    }));
+    resetOpenCodeGoUsageCacheForTests();
+    const upstream = await startUpstream({
+      id: 'msg-go-prime',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        { ...model('go-prime', 'anthropic', 'opencode-go', { baseUrl: upstream.baseUrl }), providerId: 'opencode-go' },
+      ]),
+    });
+
+    try {
+      await vi.waitFor(() => expect(usageFetch).toHaveBeenCalledOnce());
+      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'go-prime', messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      expect(response.headers.get('anthropic-ratelimit-unified-5h-utilization')).toBe('0.94');
+    } finally {
+      resetOpenCodeGoUsageCacheForTests();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('adds Go limit headers to Go passthrough responses but not Claude responses', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const upstream = await startUpstream({
+      id: 'msg-go-limits',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        { ...model('go-anthropic', 'anthropic', 'opencode-go', { baseUrl: upstream.baseUrl }), providerId: 'opencode-go' },
+        model('claude-native', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+      ]),
+    });
+
+    const request = (modelId: string, stream = false) => fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelId, messages: [{ role: 'user', content: 'hi' }], stream }),
+    });
+    const goResponse = await request('go-anthropic', true);
+    const claudeResponse = await request('claude-native');
+
+    expect(goResponse.headers.get('anthropic-ratelimit-unified-status')).toBe('allowed_warning');
+    expect(goResponse.headers.get('anthropic-ratelimit-unified-5h-utilization')).toBe('0.94');
+    expect(claudeResponse.headers.get('anthropic-ratelimit-unified-status')).toBeNull();
+  });
+
+  it('adds Go limit headers to translated Messages responses', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('go-sdk', 'openai', 'opencode-go'),
+        providerId: 'opencode-go',
+        npm: '@ai-sdk/openai-compatible',
+        apiBaseUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'go-key',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'go-sdk', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('anthropic-ratelimit-unified-status')).toBe('allowed_warning');
+    expect(response.headers.get('anthropic-ratelimit-unified-5h-utilization')).toBe('0.94');
+  });
+
+  it('adds Go limit headers to non-streaming translated Messages responses', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 94, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 62, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('go-sdk-nonstream', 'openai', 'opencode-go'),
+        providerId: 'opencode-go',
+        npm: '@ai-sdk/openai-compatible',
+        apiBaseUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'go-key',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'go-sdk-nonstream', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('anthropic-ratelimit-unified-5h-utilization')).toBe('0.94');
   });
 
   it('forwards anonymous Anthropic-native messages without authentication headers', async () => {
@@ -701,12 +840,19 @@ describe('server router', () => {
   });
 
   it('sets a clamped retry-after header on translated 429s from both endpoints', async () => {
+    process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 12, resetsAt: '2026-09-17T04:00:00.000Z' },
+        weekly: { status: 'ok', percent: 20, resetsAt: '2026-09-21T00:00:00.000Z' },
+        monthly: { status: 'ok', percent: 94, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
     const sdkCatalog = createGatewayModelCatalog([{
       id: 'sdk-model',
       name: 'SDK Model',
       isFree: false,
       brand: 'Test',
-      providerId: 'test-provider',
+      providerId: 'opencode-go',
       sourceBackend: 'test-provider',
       modelFormat: 'openai',
       npm: '@ai-sdk/openai',
@@ -728,12 +874,13 @@ describe('server router', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'anthropic-test-provider__sdk-model',
+        model: 'anthropic-opencode-go__sdk-model',
         messages: [{ role: 'user', content: 'hi' }],
       }),
     });
     expect(anthropicResponse.status).toBe(429);
     expect(anthropicResponse.headers.get('retry-after')).toBe('60');
+    expect(anthropicResponse.headers.get('anthropic-ratelimit-unified-status')).toBeNull();
 
     // OpenAI-format endpoint: an in-range hint is forwarded as-is.
     vi.mocked(generateOpenAiResponse).mockRejectedValueOnce(rateLimitError('7'));

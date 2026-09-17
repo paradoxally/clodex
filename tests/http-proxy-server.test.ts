@@ -566,6 +566,7 @@ describe('selective HTTP proxy', () => {
       await once(secure, 'close');
 
       expect(response).toContain('200 OK');
+      expect(response).not.toContain('anthropic-ratelimit-unified-status');
       expect(receivedPath).toBe('/v1/messages?beta=true');
       expect(receivedAuth).toBe('Bearer subscription-oauth-token');
       expect(receivedBody.equals(body)).toBe(true);
@@ -1111,7 +1112,11 @@ describe('selective HTTP proxy', () => {
       adapterClaudeParentAgentId = req.headers['x-claude-code-parent-agent-id'] as string | undefined;
       adapterBody = Buffer.concat(chunks).toString();
       await new Promise(resolve => setTimeout(resolve, 35));
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Connection': 'close',
+        'anthropic-ratelimit-unified-status': 'allowed_warning',
+      });
       res.end([
         'event: message_start',
         'data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}',
@@ -1181,6 +1186,7 @@ describe('selective HTTP proxy', () => {
       await once(secure, 'close');
 
       expect(response).toContain('200 OK');
+      expect(response).toContain('anthropic-ratelimit-unified-status: allowed_warning');
       expect(anthropicRequests).toBe(0);
       expect(adapterAuth).toBeUndefined();
       expect(adapterApiKey).toBe('adapter-local-token');

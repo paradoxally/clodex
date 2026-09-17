@@ -59,7 +59,8 @@ import {
   estimateAnthropicInputTokens,
 } from './anthropic-endpoints.js';
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
-import { openCodeGoSessionHeaders } from './data/opencode-go-models.js';
+import { isOpenCodeGoModel, openCodeGoSessionHeaders } from './data/opencode-go-models.js';
+import { getOpenCodeGoLimitHeaders, refreshOpenCodeGoUsage } from './opencode-go-usage.js';
 import { anthropicBodyForUpstream } from './third-party-anthropic-body.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
@@ -340,6 +341,14 @@ export async function startProxyCatalog(
   const defaultRoute = lookupRoute(byAlias, defaultAliasId) ?? routes[0]!;
 
   const plog = makeProxyLog(debug, debugLogPath);
+  for (const route of routes) {
+    if (!isOpenCodeGoModel({
+      providerId: route.providerId,
+      apiBaseUrl: route.baseURL,
+      baseUrl: route.upstreamUrl,
+    })) continue;
+    void refreshOpenCodeGoUsage(route.apiKey, message => plog(message));
+  }
 
   const onRejection = (reason: unknown) => {
     plog(() => `Unhandled Rejection: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`);
@@ -566,6 +575,12 @@ export async function startProxyCatalog(
           plog(() => `anthropic-passthrough: model=${route.realModelId}, stream=${clientWantsStream}`);
         }
 
+        const goResponseHeaders = isOpenCodeGoModel({
+          providerId: route.providerId,
+          baseUrl: upstreamUrl,
+        })
+          ? getOpenCodeGoLimitHeaders(apiKey, message => plog(message))
+          : undefined;
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, clientWantsStream, {
             inboundBeta: effectiveBeta,
@@ -573,6 +588,7 @@ export async function startProxyCatalog(
             log: message => plog(message),
             claudeCodeSessionId,
             extraHeaders: { ...route.headers, ...goSessionHeaders },
+            responseHeaders: goResponseHeaders,
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
             signal: clientAbort.signal,
@@ -648,6 +664,12 @@ export async function startProxyCatalog(
             claudeSessionId,
           );
           if (goSdkSessionHeaders) params.headers = { ...params.headers, ...goSdkSessionHeaders };
+          const goResponseHeaders = isOpenCodeGoModel({
+            providerId: route.providerId,
+            apiBaseUrl: route.baseURL,
+          })
+            ? getOpenCodeGoLimitHeaders(apiKey, message => plog(message))
+            : undefined;
           plog(() =>
             `sdk: npm=${route.npm} model=${route.realModelId}, stream=${clientWantsStream}, ` +
             `tools=${anthropicBody.tools?.length ?? 0}, msgs=${params.messages.length}`,
@@ -681,6 +703,7 @@ export async function startProxyCatalog(
               translationLifecycle?.onOutput(chunk);
               if (!res.headersSent) {
                 res.writeHead(200, {
+                  ...goResponseHeaders,
                   'Content-Type': 'text/event-stream',
                   'Cache-Control': 'no-cache',
                   'Connection': 'keep-alive',
@@ -763,6 +786,9 @@ export async function startProxyCatalog(
             );
             translationLifecycle?.onOutput(JSON.stringify(anthropicResponse));
             translationLifecycle?.complete();
+            for (const [name, value] of Object.entries(goResponseHeaders ?? {})) {
+              res.setHeader(name, value);
+            }
             sendJson(res, 200, anthropicResponse);
           }
         };

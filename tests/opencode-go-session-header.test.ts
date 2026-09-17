@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import { createServer } from 'node:http';
 import { openCodeGoSessionHeaders, OPENCODE_GO_ANTHROPIC_BASE_URL } from '../src/data/opencode-go-models.js';
@@ -8,6 +8,20 @@ import { generateOpenAiResponse } from '../src/openai-adapter.js';
 import { startProxyCatalog, type ProxyRoute } from '../src/proxy.js';
 import { createGatewayModelCatalog } from '../src/server/models.js';
 import { startServer, type ServerHandle } from '../src/server/router.js';
+
+beforeEach(() => {
+  process.env.CLODEX_TEST_OPENCODE_GO_USAGE = JSON.stringify({
+    usage: {
+      rolling: { status: 'ok', percent: 12, resetsAt: '2026-09-17T04:00:00.000Z' },
+      weekly: { status: 'ok', percent: 20, resetsAt: '2026-09-21T00:00:00.000Z' },
+      monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+    },
+  });
+});
+
+afterEach(() => {
+  delete process.env.CLODEX_TEST_OPENCODE_GO_USAGE;
+});
 
 vi.mock('../src/provider-factory.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/provider-factory.js')>();
