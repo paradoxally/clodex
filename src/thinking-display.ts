@@ -76,6 +76,9 @@ const MAX_BUFFERED_EVENT_CHARS = 1024 * 1024;
 /** Two line endings with nothing between them: the blank line that ends an event. */
 const BLANK_LINE = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/;
 
+/** Longest a line terminator can be, so a split one is still recognised. */
+const OVERFLOW_CARRY_CHARS = 3;
+
 /**
  * The payload of a whole event. SSE allows one payload to be split over
  * consecutive `data:` lines and rejoined with newlines, and a line-at-a-time
@@ -184,29 +187,19 @@ export function anthropicSseThinkingDisplay(hide: boolean): Transform {
   const decoder = new StringDecoder('utf8');
   let tail = '';
   let current = '';
+  // Set while an event too large to hold is being relayed, so its bytes leave
+  // as they arrive rather than being buffered.
   let overflowed = false;
+  // The last few bytes of an overflowing event, held back only so a terminator
+  // split across two chunks is still recognised as one.
+  let carry = '';
 
   const handleLine = (line: string, ending: string): string => {
-    // An event already too large to hold is relayed line by line instead of
-    // buffered, so a payload the upstream never terminates cannot grow this
-    // buffer without bound. Nothing that large is a thinking delta.
-    if (overflowed) {
-      if (!line) overflowed = false;
-      return line + ending;
-    }
     current += line + ending;
-    if (!line) {
-      const raw = current;
-      current = '';
-      return rewriteEvent(raw);
-    }
-    if (current.length > MAX_BUFFERED_EVENT_CHARS) {
-      overflowed = true;
-      const flushed = current;
-      current = '';
-      return flushed;
-    }
-    return '';
+    if (line) return '';
+    const raw = current;
+    current = '';
+    return rewriteEvent(raw);
   };
 
   const consume = (parts: string[]): string => {
@@ -215,39 +208,61 @@ export function anthropicSseThinkingDisplay(hide: boolean): Transform {
     return out;
   };
 
+  /** Parse one run of complete-or-partial SSE text through the normal path. */
+  const feed = (text: string): string => {
+    const buffered = tail + text;
+    // A trailing CR may be the first half of a CRLF whose LF is still in the
+    // next chunk. Treating it as a bare-CR ending would close a line that had
+    // not ended, splitting an event in two and emitting its `event:` line
+    // with the `data:` line that followed now travelling alone.
+    const held = buffered.endsWith('\r') ? '\r' : '';
+    const parts = (held ? buffered.slice(0, -1) : buffered).split(SSE_LINE_SPLIT);
+    // The final element is the unterminated remainder of the last line.
+    tail = (parts.pop() ?? '') + held;
+    let out = consume(parts);
+    // The cap covers everything held for this event. A single line longer than
+    // the cap never reaches `handleLine`, so it has to be checked here too.
+    if (tail.length + current.length > MAX_BUFFERED_EVENT_CHARS) {
+      out += current + tail;
+      current = '';
+      tail = '';
+      overflowed = true;
+    }
+    return out;
+  };
+
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
+      let text = carry + decoder.write(chunk);
+      carry = '';
+      let out = '';
       if (overflowed) {
-        const text = decoder.write(chunk);
-        // The oversized event is over once its blank line goes by; until then
-        // its bytes are relayed and nothing is held.
-        if (BLANK_LINE.test(text)) overflowed = false;
-        callback(null, text);
-        return;
+        const match = BLANK_LINE.exec(text);
+        if (!match) {
+          // Hold a couple of bytes back so a terminator split across chunks is
+          // still seen whole. Missing it leaves this transform relaying every
+          // later event unfiltered for the rest of the stream.
+          carry = text.slice(-OVERFLOW_CARRY_CHARS);
+          callback(null, text.slice(0, text.length - carry.length));
+          return;
+        }
+        const boundary = match.index + match[0].length;
+        out += text.slice(0, boundary);
+        overflowed = false;
+        // Anything after the terminator belongs to the next event and is
+        // parsed normally rather than relayed with the oversized one.
+        text = text.slice(boundary);
+        if (!text) {
+          callback(null, out);
+          return;
+        }
       }
-      const buffered = tail + decoder.write(chunk);
-      // A trailing CR may be the first half of a CRLF whose LF is still in the
-      // next chunk. Treating it as a bare-CR ending would close a line that had
-      // not ended, splitting an event in two and emitting its `event:` line
-      // with the `data:` line that followed now travelling alone.
-      const held = buffered.endsWith('\r') ? '\r' : '';
-      const parts = (held ? buffered.slice(0, -1) : buffered).split(SSE_LINE_SPLIT);
-      // The final element is the unterminated remainder of the last line.
-      tail = (parts.pop() ?? '') + held;
-      let out = consume(parts);
-      // The cap is on everything held for this event. A single line longer than
-      // the cap never reaches `handleLine`, so it has to be checked here too.
-      if (tail.length + current.length > MAX_BUFFERED_EVENT_CHARS) {
-        out += current + tail;
-        current = '';
-        tail = '';
-        overflowed = true;
-      }
-      callback(null, out);
+      callback(null, out + feed(text));
     },
     flush(callback) {
+      let out = carry;
+      carry = '';
       const rest = tail + decoder.end();
-      let out = '';
       if (rest) {
         const parts = rest.split(SSE_LINE_SPLIT);
         const remainder = parts.length % 2 === 1 ? parts.pop()! : '';
