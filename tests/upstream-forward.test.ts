@@ -635,7 +635,7 @@ describe('relayAnthropicMessages hideThinkingText', () => {
     vi.unstubAllGlobals();
   });
 
-  it('removes the thinking text from the streamed response', async () => {
+  it('removes the thinking block from the streamed response', async () => {
     stubStreamUpstream();
     const res = makeStreamRes();
     await relayAnthropicMessages(
@@ -650,9 +650,12 @@ describe('relayAnthropicMessages hideThinkingText', () => {
 
     expect(res.body()).not.toContain('the raw reasoning');
     expect(res.body()).not.toContain('thinking_delta');
-    // The block and its signature must survive, or Claude Code cannot replay it.
-    expect(res.body()).toContain('"type":"thinking"');
-    expect(res.body()).toContain('"signature":"sig-1"');
+    // The block itself goes too: an empty one still drives Claude Code's
+    // spinner into its thinking state and out again, which is the flicker.
+    expect(res.body()).not.toContain('"type":"thinking"');
+    expect(res.body()).not.toContain('signature_delta');
+    // And the block after it moves down, or the client drops the answer.
+    expect(res.body()).toContain('"index":0');
     expect(res.body()).toContain('the answer');
   });
 
@@ -689,10 +692,11 @@ describe('relayAnthropicMessages hideThinkingText', () => {
     expect(res.body()).toContain('"model":"clodex:opencode-go:deepseek"');
     expect(res.body()).not.toContain('"model":"deepseek-v4.1-flash"');
     expect(res.body()).not.toContain('the raw reasoning');
-    expect(res.body()).toContain('"signature":"sig-1"');
+    expect(res.body()).not.toContain('"type":"thinking"');
+    expect(res.body()).toContain('"index":0');
   });
 
-  it('blanks a thinking block in a non-streaming response but keeps its signature', async () => {
+  it('removes a thinking block in a non-streaming response', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       id: 'msg_1',
       type: 'message',
@@ -714,8 +718,7 @@ describe('relayAnthropicMessages hideThinkingText', () => {
     );
 
     const body = JSON.parse(res.body()) as { content: Array<Record<string, unknown>> };
-    expect(body.content[0]).toEqual({ type: 'thinking', thinking: '', signature: 'sig-1' });
-    expect(body.content[1]).toEqual({ type: 'text', text: 'the answer' });
+    expect(body.content).toEqual([{ type: 'text', text: 'the answer' }]);
   });
 
   it('leaves a non-streaming response byte-identical when nothing is hidden', async () => {

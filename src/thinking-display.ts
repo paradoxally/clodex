@@ -18,9 +18,18 @@
 // `thinking`-tagged blocks carried text zero times.
 //
 // So a third-party route that streams its model's reasoning into the thinking
-// block shows the user something Claude never shows. Blanking it is not a
-// cosmetic match: unfinished chain of thought is not written for a reader.
+// block shows the user something Claude never shows. Blanking that text is not
+// enough. Claude Code enters its thinking spinner state from the block's
+// `content_block_start` and arms a two-second "thought for Ns" timer the moment
+// it leaves, so an empty block flickers exactly as loudly as a full one; the
+// block is removed instead.
 //
+// Removal is not unconditional. The block is also the only carrier of two
+// things the next turn replays upstream -- an OpenAI item identity and a
+// round-trip signature -- so a block holding either stays and only its display
+// text goes. `src/sdk-adapter.ts` makes that call for the translated routes;
+// this file makes it for the raw relay, where the block never carries one.
+
 // `type: "enabled"` with `budget_tokens` is the pre-adaptive shape, where the
 // caller may have asked for the reasoning itself, so only an explicit
 // `omitted` or `updates` display touches it.
@@ -42,17 +51,17 @@ export function hidesThinkingText(thinking: unknown): boolean {
   return thinking.type === 'adaptive';
 }
 
-/** A streaming or non-streaming Anthropic Message, narrowed to the fields read here. */
-export function withoutThinkingText<T extends Record<string, unknown>>(message: T): T {
+/**
+ * A streaming or non-streaming Anthropic Message without its display-only
+ * thinking blocks. The block goes rather than its text: an empty block still
+ * drives Claude Code's spinner into its thinking state and out again, which is
+ * the flicker this exists to stop.
+ */
+export function withoutThinkingBlocks<T extends Record<string, unknown>>(message: T): T {
   const content = message.content;
   if (!Array.isArray(content)) return message;
-  let changed = false;
-  const blocks = content.map(block => {
-    if (!isRecord(block) || block.type !== 'thinking' || !block.thinking) return block;
-    changed = true;
-    return { ...block, thinking: '' };
-  });
-  return changed ? { ...message, content: blocks } : message;
+  const blocks = content.filter(block => !isRecord(block) || block.type !== 'thinking');
+  return blocks.length === content.length ? message : { ...message, content: blocks };
 }
 
 /**
@@ -105,17 +114,30 @@ function isThinkingDelta(payload: Record<string, unknown>): boolean {
     && delta.type === 'thinking_delta';
 }
 
-/**
- * A `content_block_start` that carries the whole reasoning in its opening
- * block. These upstreams send an empty one and stream the text as deltas, so
- * this is defence against a backend that shapes the block differently.
- */
-function isThinkingStart(payload: Record<string, unknown>): boolean {
+function blockType(payload: Record<string, unknown>): string | undefined {
   const block = payload.content_block;
-  return payload.type === 'content_block_start'
-    && isRecord(block)
-    && block.type === 'thinking'
-    && Boolean(block.thinking);
+  return payload.type === 'content_block_start' && isRecord(block) && typeof block.type === 'string'
+    ? block.type
+    : undefined;
+}
+
+/** The `index` an event addresses, when it carries one. */
+function eventIndex(payload: Record<string, unknown>): number | undefined {
+  return typeof payload.index === 'number' ? payload.index : undefined;
+}
+
+/**
+ * Client-side block numbering with the dropped blocks taken out. Claude Code's
+ * bundled Anthropic SDK appends each started block to an array and then reads
+ * deltas back with `content.at(index)` -- so leaving the gap where a dropped
+ * block used to be makes every later delta address a slot that does not exist,
+ * and the answer is silently discarded. Renumbering produces the stream the
+ * client would have received from a model that never emitted the block.
+ */
+function shiftIndex(index: number, dropped: readonly number[]): number {
+  let shift = 0;
+  for (const value of dropped) if (value < index) shift += 1;
+  return index - shift;
 }
 
 /**
@@ -125,8 +147,7 @@ function isThinkingStart(payload: Record<string, unknown>): boolean {
  * rejoining it produces the same event.
  */
 function rewritePayloadEvent(lines: SseLine[], payload: Record<string, unknown>): string {
-  const block = payload.content_block as Record<string, unknown>;
-  const replacement = `data: ${JSON.stringify({ ...payload, content_block: { ...block, thinking: '' } })}`;
+  const replacement = `data: ${JSON.stringify(payload)}`;
   let out = '';
   let wrotePayload = false;
   for (const { text, ending } of lines) {
@@ -161,30 +182,56 @@ function splitEvent(raw: string): SseLine[] {
  * dropping only the data line would leave the client an event with no payload,
  * so an event is held until its blank line terminates it.
  */
-function rewriteEvent(raw: string): string {
+function rewriteEvent(raw: string, dropped: number[]): string {
   const lines = splitEvent(raw);
-  // One decision per event, from the whole payload. Deciding a line at a time
-  // leaves a payload split over consecutive `data:` lines -- legal SSE --
-  // unparsed and relayed verbatim, which is the reasoning this exists to hide.
   const payload = eventPayload(lines.map(line => line.text));
   if (!payload) return raw;
+
+  // Block indices are scoped to a message, so the record belongs to the message
+  // that opened them. Carrying it into a second `message_start` in the same
+  // stream counts those drops against indices that have been reused -- a
+  // dropped index 0 followed by a new block 0 shifts it to -1.
+  if (payload.type === 'message_start') dropped.length = 0;
+
   if (isThinkingDelta(payload)) return '';
-  if (isThinkingStart(payload)) return rewritePayloadEvent(lines, payload);
-  return raw;
+
+  // The whole thinking block goes, not its text: Claude Code enters its thinking
+  // spinner from this event and arms a two-second "thought for Ns" timer when it
+  // leaves, so an empty block flickers exactly as loudly as a full one.
+  const started = blockType(payload);
+  if (started === 'thinking') {
+    const index = eventIndex(payload);
+    if (index !== undefined) dropped.push(index);
+    return '';
+  }
+
+  const index = eventIndex(payload);
+  if (index !== undefined && dropped.includes(index)) {
+    // A signature delta or a stop for the block that is no longer there. A stop
+    // in particular must not survive: the client throws `Content block not
+    // found` on one that names a block it never saw start.
+    return '';
+  }
+  if (index === undefined) return raw;
+
+  const shifted = shiftIndex(index, dropped);
+  return shifted === index ? raw : rewritePayloadEvent(lines, { ...payload, index: shifted });
 }
 
 /**
- * Line-preserving SSE transform that removes the thinking text from a stream.
+ * Line-preserving SSE transform that removes the thinking block from a stream.
  * Every event that is not a thinking delta passes through byte-for-byte, with
  * its original line ending; a partial event is carried across chunks.
  */
-export function anthropicSseThinkingDisplay(hide: boolean): Transform {
+export function anthropicSseThinkingDrop(hide: boolean): Transform {
   if (!hide) {
     return new Transform({
       transform(chunk, _encoding, callback) { callback(null, chunk); },
     });
   }
   const decoder = new StringDecoder('utf8');
+  // Block indices whose thinking block was removed, in arrival order.
+  const dropped: number[] = [];
   let tail = '';
   let current = '';
   // Set while an event too large to hold is being relayed, so its bytes leave
@@ -199,7 +246,7 @@ export function anthropicSseThinkingDisplay(hide: boolean): Transform {
     if (line) return '';
     const raw = current;
     current = '';
-    return rewriteEvent(raw);
+    return rewriteEvent(raw, dropped);
   };
 
   const consume = (parts: string[]): string => {
@@ -276,7 +323,7 @@ export function anthropicSseThinkingDisplay(hide: boolean): Transform {
         out += consume(parts);
         if (remainder) out += handleLine(remainder, '');
       }
-      out += current ? rewriteEvent(current) : '';
+      out += current ? rewriteEvent(current, dropped) : '';
       current = '';
       callback(null, out);
     },

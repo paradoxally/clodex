@@ -2294,18 +2294,21 @@ describe('hidden thinking on routed Anthropic responses', () => {
     }
   };
 
-  it('removes the reasoning text a Go route streams into the thinking block', async () => {
+  it('removes the thinking block a Go route streams, and renumbers what follows', async () => {
     stubStream();
     try {
       const response = await request(goRoute, { type: 'adaptive', display: 'omitted' });
       expect(response.status).toBe(200);
       expect(response.body).not.toContain('the raw reasoning');
       expect(response.body).not.toContain('thinking_delta');
-      // The block and its signature survive so the client can replay them, and
-      // the answer itself is untouched.
-      expect(response.body).toContain('"type":"thinking"');
-      expect(response.body).toContain('"signature":"sig-1"');
+      // The block itself, not just its text: an empty block still drives Claude
+      // Code's spinner into its thinking state and out again.
+      expect(response.body).not.toContain('"type":"thinking"');
+      expect(response.body).not.toContain('signature_delta');
+      // The answer is untouched, and the block carrying it moved down to the
+      // index the client now sees it at.
       expect(response.body).toContain('"text":"the answer"');
+      expect(response.body).toContain('"index":0');
       // The alias rewrite still applies on the same response.
       expect(response.body).toContain('"model":"clodex:opencode-go:deepseek"');
     } finally {
@@ -2320,7 +2323,7 @@ describe('hidden thinking on routed Anthropic responses', () => {
     try {
       const response = await request(goRoute, { type: 'adaptive' });
       expect(response.body).not.toContain('the raw reasoning');
-      expect(response.body).toContain('"signature":"sig-1"');
+      expect(response.body).not.toContain('"type":"thinking"');
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2335,7 +2338,7 @@ describe('hidden thinking on routed Anthropic responses', () => {
     try {
       const response = await request(goRoute, { type: 'adaptive', display: 'updates' });
       expect(response.body).not.toContain('the raw reasoning');
-      expect(response.body).toContain('"signature":"sig-1"');
+      expect(response.body).not.toContain('"type":"thinking"');
     } finally {
       vi.unstubAllGlobals();
     }

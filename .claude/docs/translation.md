@@ -18,33 +18,41 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   responses in testing.
 - Cache reads and GPT-5.6 cache writes map to Anthropic
   `cache_read_input_tokens`/`cache_creation_input_tokens`.
-- **A thinking block never carries readable chain of thought to the client.** `src/thinking-display.ts`
-  decides from the request's own `thinking` field, and clodex blanks the text on every route that is
-  not Anthropic first-party: the raw relay drops the `thinking_delta` events and clears a non-empty
-  `content_block` at block start (`src/upstream-forward.ts`), and the SDK adapter stops emitting the
-  display text while still calling `OpenAiThinkingBlock.append` so the signature envelope keeps the
-  originals to replay (`src/sdk-adapter.ts`). It fires for `display: "omitted"` (`-p`, subagents),
+- **A thinking block never carries readable chain of thought to the client, and on most routes it
+  does not reach the client at all.** `src/thinking-display.ts` decides from the request's own
+  `thinking` field. The block is what drives Claude Code's spinner: the client enters its thinking
+  state from `content_block_start` and arms a two-second "thought for Ns" timer when it leaves, so
+  an empty block flickers exactly as loudly as a full one, and the fix had to remove the block
+  rather than blank it. Only a route that has something to put in the block keeps it — an OpenAI
+  item identity plus ciphertext, or a Google thought signature — because that signature is the only
+  channel the next turn replays the reasoning on. Everything else (`@ai-sdk/openai-compatible`
+  included) drops the block and its `signature_delta`, and renumbers the blocks that follow, since
+  Claude Code's bundled Anthropic SDK appends each started block and reads deltas back with
+  `content.at(index)`: a hole in the numbering silently discards the answer. The raw relay drops the
+  block the same way (`src/upstream-forward.ts`); the SDK adapter keeps calling
+  `OpenAiThinkingBlock.append` so the signature envelope keeps the originals to replay
+  (`src/sdk-adapter.ts`). It fires for `display: "omitted"` (`-p`, subagents),
   `display: "updates"` (what a first-party connection upgrades an interactive `connector_text`
   request to, measured on a real proxy-mode run), and an adaptive request with no `display` at all —
   the interactive default. Only `display: "summarized"` keeps it. Anthropic's own answer is an empty
   thinking block in every one of those shapes; across 1,839 transcripts on this machine, 33,351
   `thinking`-tagged blocks carried text zero times, and the readable text it does return rides a
-  separate `narration` channel. Measured live 2026-09-17 against OpenCode Go: DeepSeek 553 -> 0
-  characters and Luna 1,740 -> 0 through a real Claude Code, with Luna's envelope still holding
-  1,771 characters of the original summary. Claude routes are untouched.
+  separate `narration` channel. Measured live 2026-09-17 through a real Claude Code on a pty,
+  spinner line sampled at 1.5 ms: a DeepSeek turn went from 10 thinking-suffix flips and 41
+  `thought for Ns` lines to 0 and 0, with the transcript's assistant messages carrying 0 thinking
+  blocks against 2 text blocks and 1 tool_use. Luna keeps its block for the envelope and is
+  unchanged; a Claude Sonnet turn measured 4 flips both before and after. Claude routes are
+  untouched.
 
   Two consequences worth knowing. The raw relay's transform holds one whole event before deciding,
   joins a payload split over consecutive `data:` lines before parsing it, and holds back a trailing
   CR until it knows whether an LF follows — a line-at-a-time parse or a bare-CR read closes an event
   early and relays the reasoning. Because it holds a whole event, it caps what it holds at 1 MiB and
   relays the rest of that event untouched: every upstream seen so far terminates its events, so this
-  is a backstop, and nothing that large is a thinking delta. And on `@ai-sdk/openai-compatible` routes the reasoning is carried
-  only by the display text, because `OpenAiThinkingBlock` needs a Responses `itemId` the compatible
-  adapter does not emit: hiding it there means the next turn replays an empty `reasoning_content`
-  rather than the original. That is what clodex already sends when the field is absent, and DeepSeek
-  documents not replaying it either, so no route breaks; the cost is the provider's prefix cache on
-  the assistant turn, once per conversation. Extending the envelope to a second npm is the fix if
-  that cost ever matters.
+  is a backstop, and nothing that large is a thinking delta. That
+  drop-and-renumber is also what decides which routes keep their block, so read `hideThinkingText`
+  and `dropThinkingBlock` together: the flag pairs with `reasoningRoundTripsThroughSignature(npm)` in
+  `src/sdk-adapter.ts`, and an OpenAI `itemId` in the stream overrides it at `reasoning-start`.
 - Consecutive OpenAI Responses reasoning summaries/items stream into **one Anthropic thinking
   block** until text, a tool, or successful completion closes it. A thinking-only WebSocket drop
   leaves that block open, so an earlier summary cannot disable Claude Code's mid-stream retry.

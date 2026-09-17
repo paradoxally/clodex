@@ -4,7 +4,7 @@ import type { ServerResponse } from 'node:http';
 import { sanitizeCredential } from './server/auth.js';
 import { CLAUDE_CODE_USER_AGENT } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
-import { anthropicSseThinkingDisplay, withoutThinkingText } from './thinking-display.js';
+import { anthropicSseThinkingDrop, withoutThinkingBlocks } from './thinking-display.js';
 
 export function anthropicUpstreamHeaders(
   apiKey: string,
@@ -135,10 +135,11 @@ export interface RelayAnthropicOptions {
    */
   responseModelOverride?: string;
   /**
-   * Remove the thinking text from the relayed response. The client asked for a
+   * Remove the thinking block from the relayed response. The client asked for a
    * shape Anthropic answers with an empty thinking block (see
    * `src/thinking-display.ts`); a third-party upstream streams its raw reasoning
-   * into the same block instead.
+   * into the same block instead. Blanking the block would not do: the client
+   * drives its spinner off the block's own start, so an empty one flickers.
    */
   hideThinkingText?: boolean;
 }
@@ -283,7 +284,7 @@ export async function relayAnthropicMessages(
       relayed = relayed.pipe(anthropicSseModelRewrite(options.responseModelOverride));
     }
     if (options.hideThinkingText) {
-      relayed = relayed.pipe(anthropicSseThinkingDisplay(true));
+      relayed = relayed.pipe(anthropicSseThinkingDrop(true));
     }
     relayed.on('error', () => res.destroy()).pipe(res);
     return;
@@ -317,7 +318,7 @@ export async function relayAnthropicMessages(
     // carry a `model` is not the assistant's Message, and neither rewriting its
     // id nor blanking a field it does not have is clodex's call.
     let message = parsed as Record<string, unknown>;
-    if (options.hideThinkingText) message = withoutThinkingText(message);
+    if (options.hideThinkingText) message = withoutThinkingBlocks(message);
     if (options.responseModelOverride && typeof message.model === 'string') {
       message = { ...message, model: options.responseModelOverride };
     }
