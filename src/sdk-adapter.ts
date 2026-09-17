@@ -30,6 +30,7 @@ import { CLAUDE_CODE_COMPACT_PROMPT_MARKERS } from './claude-code-compact-prompt
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 import { OpenAiThinkingBlock, openAiReasoningItemId, restoreOpenAiThinking } from './openai-thinking.js';
 import { isOpenCodeGoModel, OPENCODE_GO_PROVIDER_ID } from './data/opencode-go-models.js';
+import { hidesThinkingText } from './thinking-display.js';
 
 export { silenceSdkWarnings };
 
@@ -80,7 +81,7 @@ export interface AnthropicRequest {
   max_tokens?: number;
   temperature?: number;
   stream?: boolean;
-  thinking?: { type?: string; budget_tokens?: number };
+  thinking?: { type?: string; budget_tokens?: number; display?: string };
   output_config?: { effort?: string };
   metadata?: { user_id?: unknown };
   diagnostics?: unknown;
@@ -207,6 +208,13 @@ export interface SdkCallParams {
   headers?: Record<string, string>;
   /** Stamped into streamed reasoning signatures; never sent to the SDK. */
   reasoningOrigin?: string;
+  /**
+   * Drop the displayed copy of the model's reasoning. Never sent to the SDK, and
+   * it does not stop the reasoning itself being carried: `OpenAiThinkingBlock`
+   * accumulates the originals into the signature envelope, which is what the
+   * next turn replays. See `src/thinking-display.ts` for when this is set.
+   */
+  hideThinkingText?: boolean;
 }
 
 // ── system ───────────────────────────────────────────────────────────────────
@@ -731,6 +739,9 @@ export function translateRequest(
     temperature: body.temperature,
     providerOptions,
     ...(reasoningOrigin ? { reasoningOrigin } : {}),
+    // Computed from the request alone: every route that reaches the SDK is a
+    // third-party one, and Anthropic handles its own display request upstream.
+    ...(hidesThinkingText(body.thinking) ? { hideThinkingText: true } : {}),
   };
 }
 
@@ -894,6 +905,7 @@ export async function writeAnthropicStream(
   observer?: AnthropicStreamObserver,
   tools?: SdkCallParams['tools'],
   reasoningOrigin?: string,
+  hideThinkingText?: boolean,
 ): Promise<void> {
   const messageId = 'msg_' + Date.now();
   const requiredProps = toolRequiredProps(tools);
@@ -996,13 +1008,21 @@ export async function writeAnthropicStream(
           openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
         }
         break;
-      case 'reasoning-delta':
+      case 'reasoning-delta': {
         if (openType !== 'thinking') openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
-        emit('content_block_delta', {
-          type: 'content_block_delta', index: blockIndex,
-          delta: { type: 'thinking_delta', thinking: openAiThinking ? openAiThinking.append(part) : part.text ?? '' },
-        });
+        // `append` runs even when the text is hidden: it accumulates each
+        // item's original summary into the signature envelope, which is the only
+        // thing the next turn replays upstream. Dropping the call to drop the
+        // display would silently discard the reasoning instead.
+        const display = openAiThinking ? openAiThinking.append(part) : part.text ?? '';
+        if (!hideThinkingText) {
+          emit('content_block_delta', {
+            type: 'content_block_delta', index: blockIndex,
+            delta: { type: 'thinking_delta', thinking: display },
+          });
+        }
         break;
+      }
       case 'reasoning-end': {
         if (openAiThinking) openAiThinking.end(part);
         else {
@@ -1141,7 +1161,7 @@ export async function streamAnthropicResponse(
   log?: LogFn,
   observer?: AnthropicStreamObserver,
 ): Promise<void> {
-  const { reasoningOrigin, ...callParams } = params;
+  const { reasoningOrigin, hideThinkingText, ...callParams } = params;
   const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget({
     idleTimeoutMs: observer?.idleTimeoutMs,
   });
@@ -1186,6 +1206,7 @@ export async function streamAnthropicResponse(
 
     await writeAnthropicStream(
       watchedStream, modelId, write, log, { ...observer, abortSignal }, params.tools, reasoningOrigin,
+      hideThinkingText,
     );
   } finally {
     stopForwardingAbort();
@@ -1210,7 +1231,9 @@ export async function generateAnthropicResponse(
     idleTimeoutMs?: number;
   },
 ): Promise<Record<string, unknown>> {
-  const { reasoningOrigin: _reasoningOrigin, ...callParams } = params;
+  // This path emits no thinking block at all, so `hideThinkingText` has nothing
+  // to act on; both are stripped so neither reaches the SDK as an unknown option.
+  const { reasoningOrigin: _reasoningOrigin, hideThinkingText: _hideThinkingText, ...callParams } = params;
   let text: string;
   let toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
   let finishReason: string;

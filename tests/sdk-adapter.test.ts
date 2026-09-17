@@ -19,6 +19,7 @@ import {
   silenceSdkWarnings,
 } from '../src/sdk-adapter.js';
 import { installParentNoticeSink } from '../src/parent-notice.js';
+import { restoreOpenAiThinking } from '../src/openai-thinking.js';
 
 describe('sdkTranslationErrorSignature', () => {
   it('classifies missing stream parts without exposing their dynamic ids', () => {
@@ -2390,5 +2391,156 @@ describe('translateRequest openai promptCacheKey', () => {
 
   it('omits the key for non-OpenAI providers', () => {
     expect(keyOf(req(), '@ai-sdk/xai')).toBeUndefined();
+  });
+});
+
+describe('hideThinkingText', () => {
+  const reasoningEvents = () => [
+    { type: 'start' },
+    { type: 'reasoning-start', id: 'r1', providerMetadata: { openai: { itemId: 'rs_1' } } },
+    { type: 'reasoning-delta', id: 'r1', text: 'Weighing the options.' },
+    { type: 'reasoning-end', id: 'r1', providerMetadata: { openai: { reasoningEncryptedContent: 'enc_1' } } },
+    { type: 'text-start', id: 't1' },
+    { type: 'text-delta', id: 't1', text: 'done' },
+    { type: 'finish', finishReason: 'stop' },
+  ];
+
+  const collectStream = async (hide: boolean): Promise<string> => {
+    let raw = '';
+    async function* gen() { for (const p of reasoningEvents()) yield p; }
+    await writeAnthropicStream(
+      gen() as any, 'm', c => { raw += c; }, undefined, undefined, undefined, 'opencode-go', hide,
+    );
+    return raw;
+  };
+
+  const parsed = (raw: string) => raw.split('\n\n').filter(Boolean).map(block => {
+    const [evLine, dataLine] = block.split('\n');
+    return { event: evLine.replace('event: ', ''), data: JSON.parse(dataLine.replace('data: ', '')) };
+  });
+
+  it('drops the displayed reasoning and keeps the signature that carries it', async () => {
+    const events = parsed(await collectStream(true));
+    expect(events.some(e => e.data.delta?.type === 'thinking_delta')).toBe(false);
+    expect(events.some(e => e.event === 'content_block_start' && e.data.content_block.type === 'thinking')).toBe(true);
+    const sig = events.find(e => e.data.delta?.type === 'signature_delta')!.data.delta.signature as string;
+    expect(sig.startsWith('clodex:openai-thinking:v1:')).toBe(true);
+    expect(JSON.parse(sig.slice('clodex:openai-thinking:v1:'.length)).parts[0].text)
+      .toBe('Weighing the options.');
+    expect(events.some(e => e.data.delta?.type === 'text_delta' && e.data.delta.text === 'done')).toBe(true);
+  });
+
+  it('still replays the original reasoning on the next turn', async () => {
+    // The whole point of blanking the display: the client's replayed thinking
+    // block carries no text, so the envelope is the only route back to the
+    // upstream summary. Losing it would silently strip the model's reasoning.
+    const events = parsed(await collectStream(true));
+    const sig = events.find(e => e.data.delta?.type === 'signature_delta')!.data.delta.signature as string;
+    const restored = restoreOpenAiThinking('', sig, '@ai-sdk/openai', 'opencode-go');
+    expect(restored).toEqual([{
+      type: 'reasoning',
+      text: 'Weighing the options.',
+      providerOptions: { openai: { itemId: 'rs_1', reasoningEncryptedContent: 'enc_1' } },
+    }]);
+  });
+
+  it('leaves the stream unchanged when the client did not ask for hidden thinking', async () => {
+    const events = parsed(await collectStream(false));
+    expect(events.filter(e => e.data.delta?.type === 'thinking_delta').map(e => e.data.delta.thinking))
+      .toEqual(['Weighing the options.']);
+  });
+
+  it('sets the flag from an adaptive request that names no display', () => {
+    // The interactive Claude Code shape: `pKn` returns undefined when
+    // isNonInteractive is false, so `display` is absent entirely.
+    expect(translateRequest({
+      model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hi' }], thinking: { type: 'adaptive' },
+    }, '@ai-sdk/openai').hideThinkingText).toBe(true);
+  });
+
+  it('sets the flag for an explicit omitted display', () => {
+    expect(translateRequest({
+      model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hi' }],
+      thinking: { type: 'adaptive', display: 'omitted' },
+    }, '@ai-sdk/openai').hideThinkingText).toBe(true);
+  });
+
+  it('sets the flag for the streaming-updates display a first-party session sends', () => {
+    expect(translateRequest({
+      model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hi' }],
+      thinking: { type: 'adaptive', display: 'updates' },
+    }, '@ai-sdk/openai').hideThinkingText).toBe(true);
+  });
+
+  it('leaves the reasoning visible when the client asked for summaries', () => {
+    expect(translateRequest({
+      model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hi' }],
+      thinking: { type: 'adaptive', display: 'summarized' },
+    }, '@ai-sdk/openai').hideThinkingText).toBeUndefined();
+  });
+
+  it('leaves the reasoning visible for legacy extended thinking', () => {
+    expect(translateRequest({
+      model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hi' }],
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+    }, '@ai-sdk/openai').hideThinkingText).toBeUndefined();
+  });
+
+  it('sets no flag when the request carries no thinking field', () => {
+    expect(translateRequest({
+      model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hi' }],
+    }, '@ai-sdk/openai').hideThinkingText).toBeUndefined();
+  });
+
+  it('hides through the real streaming seam and keeps the flag off the SDK call', async () => {
+    // Drives `streamAnthropicResponse`, not `writeAnthropicStream`. The flag
+    // reaches it as a field on the params object, which both adapters spread
+    // straight into `streamText`; a missing destructure there would hand an
+    // unknown option to the provider AND stop the hiding, and no test that
+    // only inspects `translateRequest`'s return value would notice either.
+    vi.resetModules();
+    const parts = [
+      { type: 'start' },
+      { type: 'reasoning-start', id: 'r1', providerMetadata: { openai: { itemId: 'rs_1' } } },
+      { type: 'reasoning-delta', id: 'r1', text: 'Weighing the options.' },
+      { type: 'reasoning-end', id: 'r1', providerMetadata: { openai: { reasoningEncryptedContent: 'enc_1' } } },
+      { type: 'text-start', id: 't1' },
+      { type: 'text-delta', id: 't1', text: 'done' },
+      { type: 'finish', finishReason: 'stop' },
+    ];
+    async function* stream() { for (const part of parts) yield part; }
+    const streamText = vi.fn(() => ({ stream: stream() }));
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
+      generateText: vi.fn(),
+      streamText,
+      tool: vi.fn((spec: unknown) => spec),
+      jsonSchema: vi.fn((schema: unknown) => schema),
+    }));
+
+    try {
+      const { streamAnthropicResponse } = await import('../src/sdk-adapter.js');
+      let raw = '';
+      await streamAnthropicResponse(
+        {} as never,
+        {
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+          reasoningOrigin: 'opencode-go',
+          hideThinkingText: true,
+        } as never,
+        'm',
+        chunk => { raw += chunk; },
+      );
+
+      const sdkOptions = streamText.mock.calls[0]![0] as Record<string, unknown>;
+      expect(Object.keys(sdkOptions)).not.toContain('hideThinkingText');
+      expect(Object.keys(sdkOptions)).not.toContain('reasoningOrigin');
+      expect(raw).not.toContain('thinking_delta');
+      expect(raw).toContain('signature_delta');
+      expect(raw).toContain('"text":"done"');
+    } finally {
+      vi.doUnmock('ai');
+      vi.resetModules();
+    }
   });
 });

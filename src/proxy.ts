@@ -61,7 +61,8 @@ import {
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
 import { isOpenCodeGoModel, openCodeGoSessionHeaders } from './data/opencode-go-models.js';
 import { getOpenCodeGoLimitHeaders, refreshOpenCodeGoUsage } from './opencode-go-usage.js';
-import { anthropicBodyForUpstream } from './third-party-anthropic-body.js';
+import { anthropicBodyForUpstream, isAnthropicFirstPartyUpstream } from './third-party-anthropic-body.js';
+import { hidesThinkingText } from './thinking-display.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
@@ -551,6 +552,12 @@ export async function startProxyCatalog(
         );
         const targetUrl = `${upstreamUrl}/v1/messages`;
         const isOAuth = routeAuthType === 'oauth';
+        // Claude answers an omitted-display request with an empty thinking block
+        // itself; only a third-party upstream streams raw reasoning into it.
+        const hideThinkingText = !isAnthropicFirstPartyUpstream({
+          providerId: route.providerId,
+          baseUrl: upstreamUrl,
+        }) && hidesThinkingText(anthropicBody.thinking);
 
         let effectiveBeta = inboundBeta;
         let claudeCodeSessionId: string | undefined;
@@ -607,6 +614,7 @@ export async function startProxyCatalog(
                 && originalModel !== route.realModelId
                 ? originalModel
                 : undefined,
+            hideThinkingText,
             onUpstreamError: inferenceLogPath
               ? (statusCode, errorContent) => writeInferenceResponseErrorLog(inferenceLogPath, {
                   modelId: originalModel,

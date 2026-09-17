@@ -65,7 +65,8 @@ import {
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 import { isOpenCodeGoModel, openCodeGoSessionHeaders } from '../data/opencode-go-models.js';
 import { getOpenCodeGoLimitHeaders, refreshOpenCodeGoUsage } from '../opencode-go-usage.js';
-import { anthropicBodyForUpstream } from '../third-party-anthropic-body.js';
+import { anthropicBodyForUpstream, isAnthropicFirstPartyUpstream } from '../third-party-anthropic-body.js';
+import { hidesThinkingText } from '../thinking-display.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
 
 export interface ServerOptions {
@@ -336,6 +337,12 @@ async function handleAnthropicMessages(
     );
     const authType = model.authType ?? 'api';
     const isOAuth = authType === 'oauth';
+    // Claude answers an omitted-display request with an empty thinking block
+    // itself; only a third-party upstream streams raw reasoning into it.
+    const hideThinkingText = !isAnthropicFirstPartyUpstream({
+      providerId: model.providerId,
+      baseUrl: model.baseUrl,
+    }) && hidesThinkingText((body as AnthropicRequest).thinking);
     const goSessionHeaders = openCodeGoSessionHeaders(model, claudeSessionId);
 
     auditInference(options, {
@@ -387,6 +394,7 @@ async function handleAnthropicMessages(
           typeof body.model === 'string' && body.model !== upstreamModelId(model)
             ? body.model
             : undefined,
+        hideThinkingText,
         onUpstreamError: options.inferenceLogPath
           ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
               requestId,

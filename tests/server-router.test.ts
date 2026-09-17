@@ -2357,3 +2357,155 @@ describe('client disconnect cancels upstream work', () => {
     expect(clientDisconnected(observed!)).toBe(false);
   });
 });
+
+describe('hidden thinking on the endpoint server', () => {
+  // The upstream shape measured live against OpenCode Go on 2026-09-17.
+  const GO_STREAM = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_go","model":"deepseek-v4.1-flash","content":[]}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"the raw reasoning"}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-1"}}',
+    '',
+    'event: content_block_stop',
+    'data: {"type":"content_block_stop","index":0}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+  ].join('\n');
+
+  async function startSseUpstream(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+    const server = createServer((req, res) => {
+      void readRequestBody(req).then(() => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(GO_STREAM);
+      });
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('missing upstream address');
+    return {
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      close: () => new Promise<void>((resolve, reject) => server.close(err => (err ? reject(err) : resolve()))),
+    };
+  }
+
+  it('removes the reasoning text a Go route streams, and leaves Claude alone', async () => {
+    const upstream = await startSseUpstream();
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        { ...model('go-anthropic', 'anthropic', 'opencode-go', { baseUrl: upstream.baseUrl }), providerId: 'opencode-go' },
+        // `claude-code` is what a first-party Claude route carries; the local
+        // baseUrl stands in for api.anthropic.com so nothing leaves the machine.
+        { ...model('claude-native', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }), providerId: 'claude-code' },
+      ]),
+    });
+
+    const request = (modelId: string, thinking: Record<string, unknown>) => fetch(
+      `${server.url}/anthropic/v1/messages`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: modelId, messages: [{ role: 'user', content: 'hi' }], stream: true, thinking,
+        }),
+      },
+    );
+
+    const go = await request('go-anthropic', { type: 'adaptive' });
+    const goBody = await go.text();
+    expect(goBody).not.toContain('the raw reasoning');
+    expect(goBody).toContain('"signature":"sig-1"');
+
+    // Claude answers this request itself, so a Go-shaped blanking must not run.
+    const claude = await request('claude-native', { type: 'adaptive' });
+    expect(await claude.text()).toContain('the raw reasoning');
+  });
+
+  it('removes the reasoning text for the streaming-updates display', async () => {
+    const upstream = await startSseUpstream();
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        { ...model('go-anthropic', 'anthropic', 'opencode-go', { baseUrl: upstream.baseUrl }), providerId: 'opencode-go' },
+      ]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'go-anthropic',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        thinking: { type: 'adaptive', display: 'updates' },
+      }),
+    });
+    const body = await response.text();
+    expect(body).not.toContain('the raw reasoning');
+    expect(body).toContain('"signature":"sig-1"');
+  });
+
+  it('keeps the reasoning text when the client asked for summaries', async () => {
+    const upstream = await startSseUpstream();
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        { ...model('go-anthropic', 'anthropic', 'opencode-go', { baseUrl: upstream.baseUrl }), providerId: 'opencode-go' },
+      ]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'go-anthropic',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        thinking: { type: 'adaptive', display: 'summarized' },
+      }),
+    });
+    expect(await response.text()).toContain('the raw reasoning');
+  });
+
+  it('blanks a thinking block in a non-streaming Go response', async () => {
+    const upstream = await startUpstream({
+      id: 'msg-go-hidden',
+      type: 'message',
+      role: 'assistant',
+      model: 'deepseek-v4.1-flash',
+      content: [
+        { type: 'thinking', thinking: 'the raw reasoning', signature: 'sig-1' },
+        { type: 'text', text: 'the answer' },
+      ],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        { ...model('go-anthropic', 'anthropic', 'opencode-go', { baseUrl: upstream.baseUrl }), providerId: 'opencode-go' },
+      ]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'go-anthropic',
+        messages: [{ role: 'user', content: 'hi' }],
+        thinking: { type: 'adaptive' },
+      }),
+    });
+
+    const body = await response.json() as { content: Array<Record<string, unknown>> };
+    expect(body.content[0]).toEqual({ type: 'thinking', thinking: '', signature: 'sig-1' });
+    expect(body.content[1]).toEqual({ type: 'text', text: 'the answer' });
+  });
+});

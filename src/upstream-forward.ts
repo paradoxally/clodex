@@ -4,6 +4,7 @@ import type { ServerResponse } from 'node:http';
 import { sanitizeCredential } from './server/auth.js';
 import { CLAUDE_CODE_USER_AGENT } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import { anthropicSseThinkingDisplay, withoutThinkingText } from './thinking-display.js';
 
 export function anthropicUpstreamHeaders(
   apiKey: string,
@@ -133,6 +134,13 @@ export interface RelayAnthropicOptions {
    * through.
    */
   responseModelOverride?: string;
+  /**
+   * Remove the thinking text from the relayed response. The client asked for a
+   * shape Anthropic answers with an empty thinking block (see
+   * `src/thinking-display.ts`); a third-party upstream streams its raw reasoning
+   * into the same block instead.
+   */
+  hideThinkingText?: boolean;
 }
 
 /**
@@ -268,14 +276,16 @@ export async function relayAnthropicMessages(
     });
     const upstream = Readable.fromWeb(upstreamRes.body as Parameters<typeof Readable.fromWeb>[0])
       .on('error', () => res.destroy());
+    // Both transforms claim this stream on the same request: a route reached
+    // through an alias rewrites the model id AND may hide the thinking text.
+    let relayed = upstream;
     if (options.responseModelOverride) {
-      upstream
-        .pipe(anthropicSseModelRewrite(options.responseModelOverride))
-        .on('error', () => res.destroy())
-        .pipe(res);
-    } else {
-      upstream.pipe(res);
+      relayed = relayed.pipe(anthropicSseModelRewrite(options.responseModelOverride));
     }
+    if (options.hideThinkingText) {
+      relayed = relayed.pipe(anthropicSseThinkingDisplay(true));
+    }
+    relayed.on('error', () => res.destroy()).pipe(res);
     return;
   }
 
@@ -300,13 +310,19 @@ export async function relayAnthropicMessages(
   // to carry one had its `model` rewritten too — the two directions of the same
   // relay disagreed about what they were allowed to touch.
   if (
-    options.responseModelOverride
-    && parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     && (parsed as Record<string, unknown>).type === 'message'
-    && typeof (parsed as Record<string, unknown>).model === 'string'
   ) {
-    (parsed as Record<string, unknown>).model = options.responseModelOverride;
-    text = JSON.stringify(parsed);
+    // Both edits sit behind the guard above: an error envelope that happens to
+    // carry a `model` is not the assistant's Message, and neither rewriting its
+    // id nor blanking a field it does not have is clodex's call.
+    let message = parsed as Record<string, unknown>;
+    if (options.hideThinkingText) message = withoutThinkingText(message);
+    if (options.responseModelOverride && typeof message.model === 'string') {
+      message = { ...message, model: options.responseModelOverride };
+    }
+    // Neither edit applies: relay the upstream's own bytes untouched.
+    if (message !== parsed) text = JSON.stringify(message);
   }
   res.writeHead(200, {
     ...upstreamQuotaHeaders,
