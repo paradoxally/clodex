@@ -2221,3 +2221,143 @@ describe('OAuth route credential resolution', () => {
     }
   });
 });
+
+describe('hidden thinking on routed Anthropic responses', () => {
+  const goRoute: ProxyRoute = {
+    aliasId: 'clodex:opencode-go:deepseek',
+    realModelId: 'deepseek-v4.1-flash',
+    displayName: 'DeepSeek V4.1 Flash',
+    upstreamUrl: 'https://opencode.ai/zen/go',
+    apiKey: 'go-key',
+    modelFormat: 'anthropic',
+    providerId: 'opencode-go',
+  };
+  const claudeRoute: ProxyRoute = {
+    aliasId: 'clodex:claude-code:opus',
+    realModelId: 'claude-opus-5',
+    displayName: 'Opus 5',
+    upstreamUrl: 'https://api.anthropic.com',
+    apiKey: 'sk-ant-test',
+    modelFormat: 'anthropic',
+    providerId: 'claude-code',
+  };
+
+  // The upstream shape measured live against OpenCode Go on 2026-09-17: the
+  // block opens empty, the reasoning arrives as deltas, and the signature is a
+  // bare id on its own event.
+  const goStream = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_go","model":"deepseek-v4.1-flash","content":[]}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"the raw reasoning"}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-1"}}',
+    '',
+    'event: content_block_stop',
+    'data: {"type":"content_block_stop","index":0}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"the answer"}}',
+    '',
+    'event: content_block_stop',
+    'data: {"type":"content_block_stop","index":1}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+  ].join('\n');
+
+  const stubStream = () => vi.stubGlobal('fetch', vi.fn(async () => new Response(goStream, {
+    status: 200, headers: { 'Content-Type': 'text/event-stream' },
+  })));
+
+  const request = async (route: ProxyRoute, thinking: Record<string, unknown>) => {
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    try {
+      return await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+        thinking,
+      });
+    } finally {
+      handle.close();
+    }
+  };
+
+  it('removes the reasoning text a Go route streams into the thinking block', async () => {
+    stubStream();
+    try {
+      const response = await request(goRoute, { type: 'adaptive', display: 'omitted' });
+      expect(response.status).toBe(200);
+      expect(response.body).not.toContain('the raw reasoning');
+      expect(response.body).not.toContain('thinking_delta');
+      // The block and its signature survive so the client can replay them, and
+      // the answer itself is untouched.
+      expect(response.body).toContain('"type":"thinking"');
+      expect(response.body).toContain('"signature":"sig-1"');
+      expect(response.body).toContain('"text":"the answer"');
+      // The alias rewrite still applies on the same response.
+      expect(response.body).toContain('"model":"clodex:opencode-go:deepseek"');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('removes the reasoning text for an adaptive request that names no display', async () => {
+    // What an interactive Claude Code session sends; the case the reported
+    // symptom comes from.
+    stubStream();
+    try {
+      const response = await request(goRoute, { type: 'adaptive' });
+      expect(response.body).not.toContain('the raw reasoning');
+      expect(response.body).toContain('"signature":"sig-1"');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('removes the reasoning text for the streaming-updates display', async () => {
+    // The value a real proxy-mode Claude Code session actually sends: the
+    // `thinking_display_updates` beta rewrites an interactive `connector_text`
+    // request to `display:"updates"`. This is the case the reported symptom
+    // comes from, and it is not reachable from the other two shapes.
+    stubStream();
+    try {
+      const response = await request(goRoute, { type: 'adaptive', display: 'updates' });
+      expect(response.body).not.toContain('the raw reasoning');
+      expect(response.body).toContain('"signature":"sig-1"');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps the reasoning text when the client asked for summaries', async () => {
+    stubStream();
+    try {
+      const response = await request(goRoute, { type: 'adaptive', display: 'summarized' });
+      expect(response.body).toContain('the raw reasoning');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('never touches an Anthropic passthrough response', async () => {
+    stubStream();
+    try {
+      const response = await request(claudeRoute, { type: 'adaptive', display: 'omitted' });
+      expect(response.body).toContain('the raw reasoning');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

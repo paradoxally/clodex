@@ -1,4 +1,5 @@
 // tests/upstream-forward.test.ts
+import { Writable } from 'node:stream';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Writable, type Transform } from 'node:stream';
 import {
@@ -582,5 +583,161 @@ describe('relayAnthropicMessages streaming', () => {
     await done;
 
     expect(res.body()).toBe(SSE);
+  });
+});
+
+describe('relayAnthropicMessages hideThinkingText', () => {
+  const sseEvent = (name: string, data: unknown): string =>
+    `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+
+  const thinkingDelta = sseEvent('content_block_delta', {
+    type: 'content_block_delta', index: 0,
+    delta: { type: 'thinking_delta', thinking: 'the raw reasoning' },
+  });
+  const messageStart = sseEvent('message_start', {
+    type: 'message_start',
+    message: { id: 'msg_1', type: 'message', model: 'deepseek-v4.1-flash', content: [] },
+  });
+  const signatureDelta = sseEvent('content_block_delta', {
+    type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-1' },
+  });
+  const textDelta = sseEvent('content_block_delta', {
+    type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'the answer' },
+  });
+  const blockStart = sseEvent('content_block_start', {
+    type: 'content_block_start', index: 0,
+    content_block: { type: 'thinking', thinking: '', signature: '' },
+  });
+  const upstreamBody = messageStart + blockStart + thinkingDelta + signatureDelta + textDelta;
+
+  // `relayAnthropicMessages` pipes the upstream body into the response, so the
+  // streaming path needs a real Writable rather than the `makeRes` stub above.
+  const makeStreamRes = () => {
+    const chunks: Buffer[] = [];
+    let headers: Record<string, string> = {};
+    const res = new Writable({
+      write(chunk, _encoding, callback) { chunks.push(Buffer.from(chunk as Buffer)); callback(); },
+    });
+    return Object.assign(res, {
+      writeHead(_code: number, hdrs: Record<string, string>) { headers = hdrs; return res; },
+      body: () => Buffer.concat(chunks).toString('utf8'),
+      headers: () => headers,
+    });
+  };
+
+  const stubStreamUpstream = () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(upstreamBody, {
+      status: 200, headers: { 'Content-Type': 'text/event-stream' },
+    })));
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('removes the thinking text from the streamed response', async () => {
+    stubStreamUpstream();
+    const res = makeStreamRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'deepseek-v4.1-flash' },
+      'key',
+      true,
+      { hideThinkingText: true },
+    );
+    await new Promise(resolve => res.on('finish', resolve));
+
+    expect(res.body()).not.toContain('the raw reasoning');
+    expect(res.body()).not.toContain('thinking_delta');
+    // The block and its signature must survive, or Claude Code cannot replay it.
+    expect(res.body()).toContain('"type":"thinking"');
+    expect(res.body()).toContain('"signature":"sig-1"');
+    expect(res.body()).toContain('the answer');
+  });
+
+  it('relays the stream untouched when the client did not ask for hidden thinking', async () => {
+    stubStreamUpstream();
+    const res = makeStreamRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'deepseek-v4.1-flash' },
+      'key',
+      true,
+      {},
+    );
+    await new Promise(resolve => res.on('finish', resolve));
+    expect(res.body()).toBe(upstreamBody);
+  });
+
+  it('applies the model rewrite and the hidden thinking on the same response', async () => {
+    // A Go route reached through an alias sets both options at once, so the two
+    // transforms share one stream; either alone leaves the other's work undone.
+    stubStreamUpstream();
+    const res = makeStreamRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'deepseek-v4.1-flash' },
+      'key',
+      true,
+      { hideThinkingText: true, responseModelOverride: 'clodex:opencode-go:deepseek' },
+    );
+    await new Promise(resolve => res.on('finish', resolve));
+
+    expect(res.body()).toContain('"model":"clodex:opencode-go:deepseek"');
+    expect(res.body()).not.toContain('"model":"deepseek-v4.1-flash"');
+    expect(res.body()).not.toContain('the raw reasoning');
+    expect(res.body()).toContain('"signature":"sig-1"');
+  });
+
+  it('blanks a thinking block in a non-streaming response but keeps its signature', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      id: 'msg_1',
+      type: 'message',
+      model: 'deepseek-v4.1-flash',
+      content: [
+        { type: 'thinking', thinking: 'the raw reasoning', signature: 'sig-1' },
+        { type: 'text', text: 'the answer' },
+      ],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const res = makeStreamRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'deepseek-v4.1-flash' },
+      'key',
+      false,
+      { hideThinkingText: true },
+    );
+
+    const body = JSON.parse(res.body()) as { content: Array<Record<string, unknown>> };
+    expect(body.content[0]).toEqual({ type: 'thinking', thinking: '', signature: 'sig-1' });
+    expect(body.content[1]).toEqual({ type: 'text', text: 'the answer' });
+  });
+
+  it('leaves a non-streaming response byte-identical when nothing is hidden', async () => {
+    const raw = JSON.stringify({
+      id: 'msg_1',
+      type: 'message',
+      model: 'deepseek-v4.1-flash',
+      content: [{ type: 'thinking', thinking: 'the raw reasoning', signature: 'sig-1' }],
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const res = makeStreamRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'deepseek-v4.1-flash' },
+      'key',
+      false,
+      {},
+    );
+    expect(res.body()).toBe(raw);
   });
 });
