@@ -36,7 +36,9 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   Two consequences worth knowing. The raw relay's transform holds one whole event before deciding,
   joins a payload split over consecutive `data:` lines before parsing it, and holds back a trailing
   CR until it knows whether an LF follows — a line-at-a-time parse or a bare-CR read closes an event
-  early and relays the reasoning. And on `@ai-sdk/openai-compatible` routes the reasoning is carried
+  early and relays the reasoning. Because it holds a whole event, it caps what it holds at 1 MiB and
+  relays the rest of that event untouched: every upstream seen so far terminates its events, so this
+  is a backstop, and nothing that large is a thinking delta. And on `@ai-sdk/openai-compatible` routes the reasoning is carried
   only by the display text, because `OpenAiThinkingBlock` needs a Responses `itemId` the compatible
   adapter does not emit: hiding it there means the next turn replays an empty `reasoning_content`
   rather than the original. That is what clodex already sends when the field is absent, and DeepSeek

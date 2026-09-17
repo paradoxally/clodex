@@ -63,16 +63,18 @@ export function withoutThinkingText<T extends Record<string, unknown>>(message: 
  */
 const SSE_LINE_SPLIT = /(\r\n|\r|\n)/;
 
-/** The `data:` payload of a single line, or undefined when the line is not one. */
-function dataPayload(line: string): Record<string, unknown> | undefined {
-  if (!line.startsWith('data:')) return undefined;
-  try {
-    const parsed = JSON.parse(line.slice(5)) as unknown;
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
+/**
+ * How much of one event is held before it is relayed untouched. Every upstream
+ * seen so far terminates each event, so this is a backstop against one that
+ * does not: without it a stream that never emits a blank line grows this
+ * buffer for as long as it runs. Well above any real event -- a thinking delta
+ * is a few bytes and a tool-argument delta is orders of magnitude smaller than
+ * this -- so exceeding it means the event is not something to hide.
+ */
+const MAX_BUFFERED_EVENT_CHARS = 1024 * 1024;
+
+/** Two line endings with nothing between them: the blank line that ends an event. */
+const BLANK_LINE = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/;
 
 /**
  * The payload of a whole event. SSE allows one payload to be split over
@@ -105,11 +107,35 @@ function isThinkingDelta(payload: Record<string, unknown>): boolean {
  * block. These upstreams send an empty one and stream the text as deltas, so
  * this is defence against a backend that shapes the block differently.
  */
-function blankedThinkingStart(payload: Record<string, unknown>, ending: string): string | undefined {
+function isThinkingStart(payload: Record<string, unknown>): boolean {
   const block = payload.content_block;
-  if (payload.type !== 'content_block_start' || !isRecord(block)) return undefined;
-  if (block.type !== 'thinking' || !block.thinking) return undefined;
-  return `data: ${JSON.stringify({ ...payload, content_block: { ...block, thinking: '' } })}${ending}`;
+  return payload.type === 'content_block_start'
+    && isRecord(block)
+    && block.type === 'thinking'
+    && Boolean(block.thinking);
+}
+
+/**
+ * Rewrite an event whose whole-event payload must change. Every line is kept
+ * as it arrived except the `data:` lines, which collapse into one carrying the
+ * replacement; a payload split over several `data:` lines is legal SSE and
+ * rejoining it produces the same event.
+ */
+function rewritePayloadEvent(lines: SseLine[], payload: Record<string, unknown>): string {
+  const block = payload.content_block as Record<string, unknown>;
+  const replacement = `data: ${JSON.stringify({ ...payload, content_block: { ...block, thinking: '' } })}`;
+  let out = '';
+  let wrotePayload = false;
+  for (const { text, ending } of lines) {
+    if (!text.startsWith('data:')) {
+      out += text + ending;
+      continue;
+    }
+    if (wrotePayload) continue;
+    wrotePayload = true;
+    out += replacement + ending;
+  }
+  return out;
 }
 
 interface SseLine { text: string; ending: string }
@@ -134,15 +160,14 @@ function splitEvent(raw: string): SseLine[] {
  */
 function rewriteEvent(raw: string): string {
   const lines = splitEvent(raw);
+  // One decision per event, from the whole payload. Deciding a line at a time
+  // leaves a payload split over consecutive `data:` lines -- legal SSE --
+  // unparsed and relayed verbatim, which is the reasoning this exists to hide.
   const payload = eventPayload(lines.map(line => line.text));
-  if (payload && isThinkingDelta(payload)) return '';
-  let out = '';
-  for (const { text, ending } of lines) {
-    const linePayload = dataPayload(text);
-    const blanked = linePayload && blankedThinkingStart(linePayload, ending);
-    out += blanked ?? text + ending;
-  }
-  return out;
+  if (!payload) return raw;
+  if (isThinkingDelta(payload)) return '';
+  if (isThinkingStart(payload)) return rewritePayloadEvent(lines, payload);
+  return raw;
 }
 
 /**
@@ -159,13 +184,29 @@ export function anthropicSseThinkingDisplay(hide: boolean): Transform {
   const decoder = new StringDecoder('utf8');
   let tail = '';
   let current = '';
+  let overflowed = false;
 
   const handleLine = (line: string, ending: string): string => {
+    // An event already too large to hold is relayed line by line instead of
+    // buffered, so a payload the upstream never terminates cannot grow this
+    // buffer without bound. Nothing that large is a thinking delta.
+    if (overflowed) {
+      if (!line) overflowed = false;
+      return line + ending;
+    }
     current += line + ending;
-    if (line) return '';
-    const raw = current;
-    current = '';
-    return rewriteEvent(raw);
+    if (!line) {
+      const raw = current;
+      current = '';
+      return rewriteEvent(raw);
+    }
+    if (current.length > MAX_BUFFERED_EVENT_CHARS) {
+      overflowed = true;
+      const flushed = current;
+      current = '';
+      return flushed;
+    }
+    return '';
   };
 
   const consume = (parts: string[]): string => {
@@ -176,6 +217,14 @@ export function anthropicSseThinkingDisplay(hide: boolean): Transform {
 
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
+      if (overflowed) {
+        const text = decoder.write(chunk);
+        // The oversized event is over once its blank line goes by; until then
+        // its bytes are relayed and nothing is held.
+        if (BLANK_LINE.test(text)) overflowed = false;
+        callback(null, text);
+        return;
+      }
       const buffered = tail + decoder.write(chunk);
       // A trailing CR may be the first half of a CRLF whose LF is still in the
       // next chunk. Treating it as a bare-CR ending would close a line that had
@@ -185,7 +234,16 @@ export function anthropicSseThinkingDisplay(hide: boolean): Transform {
       const parts = (held ? buffered.slice(0, -1) : buffered).split(SSE_LINE_SPLIT);
       // The final element is the unterminated remainder of the last line.
       tail = (parts.pop() ?? '') + held;
-      callback(null, consume(parts));
+      let out = consume(parts);
+      // The cap is on everything held for this event. A single line longer than
+      // the cap never reaches `handleLine`, so it has to be checked here too.
+      if (tail.length + current.length > MAX_BUFFERED_EVENT_CHARS) {
+        out += current + tail;
+        current = '';
+        tail = '';
+        overflowed = true;
+      }
+      callback(null, out);
     },
     flush(callback) {
       const rest = tail + decoder.end();

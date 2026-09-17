@@ -209,6 +209,39 @@ describe('anthropicSseThinkingDisplay', () => {
     expect(await collect(anthropicSseThinkingDisplay(true), [huge + ping])).toBe(ping);
   });
 
+  it('blanks a thinking block whose content_block_start is split over data lines', async () => {
+    // The same legal framing as the delta case: deciding per line leaves this
+    // one unparsed, and the reasoning inside content_block reaches the client.
+    const split = 'event: content_block_start\n'
+      + 'data: {"type":"content_block_start","index":0,\n'
+      + 'data: "content_block":{"type":"thinking","thinking":"secret at start","signature":""}}\n\n';
+    const out = await collect(anthropicSseThinkingDisplay(true), [split]);
+    expect(out).not.toContain('secret at start');
+    expect(out).toContain('"thinking":""');
+    expect(out).toContain('"type":"content_block_start"');
+  });
+
+  it('relays an event too large to hold rather than buffering it without bound', async () => {
+    // An upstream that never emits a blank line must not grow this buffer for
+    // as long as it runs: past the cap, bytes go out as they arrive.
+    const transform = anthropicSseThinkingDisplay(true);
+    const out: Buffer[] = [];
+    transform.on('data', chunk => out.push(Buffer.from(chunk)));
+    const unterminated = 'event: content_block_delta\ndata: ' + 'x'.repeat(1_200_000);
+    transform.write(Buffer.from(unterminated, 'utf8'));
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(Buffer.concat(out).toString('utf8').length).toBeGreaterThan(1_000_000);
+
+    await new Promise<void>((resolve, reject) => {
+      transform.on('end', resolve);
+      transform.on('error', reject);
+      transform.end();
+    });
+    // Past the cap the bytes are relayed unchanged, so nothing is lost.
+    expect(Buffer.concat(out).toString('utf8')).toBe(unterminated);
+  });
+
   it('passes comment lines and multi-line payloads through with their framing', async () => {
     const comment = ': keepalive\n\n';
     const multiData = 'event: x\ndata: {"a":1}\ndata: {"b":2}\n\n';
