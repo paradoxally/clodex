@@ -11,6 +11,8 @@ import { PassThrough } from 'node:stream';
 import { gzipSync } from 'node:zlib';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { ensureHttpProxyCaBundle, ensureHttpProxyCertificates } from '../src/http-proxy/ca.js';
+import { resetOpenCodeGoUsageCacheForTests } from '../src/opencode-go-usage.js';
+import { resetOpenCodeGoSessionStateForTests } from '../src/opencode-go-session.js';
 import {
   createPassthroughAgent,
   shouldInterceptConnect,
@@ -2538,6 +2540,282 @@ describe('selective HTTP proxy', () => {
         else process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = previous;
       }
     }, 20_000);
+  });
+  describe('Claude plan quota readings do not follow a Go session', () => {
+    const GO_USAGE_OVER_THRESHOLD = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 12, resetsAt: '2026-09-18T01:00:00.000Z' },
+        weekly: { status: 'ok', percent: 84, resetsAt: '2026-09-20T20:00:00.000Z' },
+        monthly: { status: 'ok', percent: 18, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const GO_USAGE_UNDER_THRESHOLD = JSON.stringify({
+      usage: {
+        rolling: { status: 'ok', percent: 12, resetsAt: '2026-09-18T01:00:00.000Z' },
+        weekly: { status: 'ok', percent: 9, resetsAt: '2026-09-20T20:00:00.000Z' },
+        monthly: { status: 'ok', percent: 4, resetsAt: '2026-10-16T19:42:49.000Z' },
+      },
+    });
+    const originalGoUsageOverride = process.env['CLODEX_TEST_OPENCODE_GO_USAGE'];
+
+    afterEach(() => {
+      resetOpenCodeGoUsageCacheForTests();
+      resetOpenCodeGoSessionStateForTests();
+      if (originalGoUsageOverride === undefined) delete process.env['CLODEX_TEST_OPENCODE_GO_USAGE'];
+      else process.env['CLODEX_TEST_OPENCODE_GO_USAGE'] = originalGoUsageOverride;
+    });
+    const CLAUDE_QUOTA_HEADERS = [
+      'anthropic-ratelimit-unified-status',
+      'anthropic-ratelimit-unified-7d-status',
+      'anthropic-ratelimit-unified-7d-utilization',
+      'anthropic-ratelimit-unified-7d-reset',
+      'anthropic-ratelimit-unified-7d-surpassed-threshold',
+      'anthropic-ratelimit-unified-representative-claim',
+      'anthropic-ratelimit-unified-reset',
+    ];
+
+    /**
+     * One Anthropic passthrough POST through the real MITM, against a fake
+     * origin that answers with the Claude plan's quota headers.
+     */
+    async function passthroughHeaders(options: {
+      logName: string;
+      routes: Array<Record<string, unknown>>;
+      claudeSessionId: string;
+      requestClass?: string;
+      model?: string;
+      /** Answer without Claude's own quota headers, as some upstream responses do. */
+      withoutClaudeQuotaHeaders?: boolean;
+    }): Promise<{ response: string; headers: Record<string, string> }> {
+      const certificates = ensureHttpProxyCertificates();
+      let sentHeaders: Record<string, string> = {};
+      const origin = https.createServer({
+        key: certificates.serverKey,
+        cert: certificates.serverCert,
+      }, (req, res) => {
+        req.resume();
+        req.on('end', () => {
+          const headers: Record<string, string> = {};
+          if (!options.withoutClaudeQuotaHeaders) {
+            for (const name of CLAUDE_QUOTA_HEADERS) headers[name] = 'allowed';
+            headers['anthropic-ratelimit-unified-status'] = 'allowed_warning';
+            headers['anthropic-ratelimit-unified-7d-utilization'] = '0.98';
+            headers['anthropic-ratelimit-unified-7d-surpassed-threshold'] = '0.75';
+          }
+          headers['x-clodex-unrelated'] = 'kept';
+          res.writeHead(200, { 'Content-Type': 'application/json', ...headers });
+          res.end('{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}');
+        });
+      });
+      const originPort = await listen(origin);
+      const proxy = await startHttpProxy({
+        routes: options.routes as never,
+        adapterHandle: { port: 1, token: 'adapter-local-token', close: () => {} },
+        inferenceLogPath: join(testHome, options.logName),
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+      try {
+        const body = JSON.stringify({
+          model: options.model ?? 'claude-haiku-4-5-20251001',
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'side query' }],
+        });
+        const secure = await connectMitm(proxy.port, certificates.caCert);
+        let response = '';
+        secure.on('data', chunk => { response += chunk.toString(); });
+        secure.write([
+          'POST /v1/messages HTTP/1.1',
+          'Host: api.anthropic.com',
+          `x-claude-code-session-id: ${options.claudeSessionId}`,
+          ...(options.requestClass ? [`x-claude-code-request-class: ${options.requestClass}`] : []),
+          'Content-Type: application/json',
+          `Content-Length: ${Buffer.byteLength(body)}`,
+          'Connection: close',
+          '',
+          '',
+        ].join('\r\n') + body);
+        await once(secure, 'close');
+        const headerEnd = response.indexOf('\r\n\r\n');
+        const head = response.slice(0, headerEnd).split('\r\n').slice(1);
+        for (const line of head) {
+          const at = line.indexOf(':');
+          if (at > 0) sentHeaders[line.slice(0, at).toLowerCase()] = line.slice(at + 1).trim();
+        }
+        return { response, headers: sentHeaders };
+      } finally {
+        await proxy.close();
+        await new Promise<void>(resolve => origin.close(() => resolve()));
+      }
+    }
+
+    it('re-asserts Go\'s window when a response carries no quota headers at all', async () => {
+      // The client keeps raising a warning it observed within the last 30 minutes,
+      // and not every upstream response carries quota headers. A Go session must
+      // therefore receive Go's readings even on a response that brought none of
+      // Claude's, or the held Claude warning survives.
+      process.env['CLODEX_TEST_OPENCODE_GO_USAGE'] = GO_USAGE_OVER_THRESHOLD;
+      resetOpenCodeGoUsageCacheForTests();
+      resetOpenCodeGoSessionStateForTests();
+
+      const goSession = '00000000-0000-4000-8000-00000000000d';
+      const goRoute = {
+        aliasId: 'clodex:opencode-go:deepseek-v4.1-flash[1m]',
+        realModelId: 'deepseek-v4.1-flash',
+        displayName: 'DeepSeek V4.1 Flash (OpenCode Go)',
+        upstreamUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'go-key',
+        modelFormat: 'anthropic' as const,
+        providerId: 'opencode-go',
+      };
+      await passthroughHeaders({
+        logName: 'quota-bare-go-turn.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'main',
+        model: goRoute.aliasId,
+      });
+      const bare = await passthroughHeaders({
+        logName: 'quota-bare-side.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'auxiliary',
+        withoutClaudeQuotaHeaders: true,
+      });
+
+      expect(bare.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.84');
+      expect(bare.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+      expect(bare.headers['x-clodex-unrelated']).toBe('kept');
+    }, 30_000);
+
+    it('leaves the upstream readings alone when Go has no numbers yet', async () => {
+      // `getOpenCodeGoLimitHeaders` is synchronous and never awaits its own refresh,
+      // so a cold cache — the state right after a restart — yields only an inert
+      // `allowed`. Substituting that would blank the banner instead of correcting
+      // it. No usage override is set and the fetch fails, so no reading arrives.
+      delete process.env['CLODEX_TEST_OPENCODE_GO_USAGE'];
+      resetOpenCodeGoUsageCacheForTests();
+      resetOpenCodeGoSessionStateForTests();
+      vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('usage unavailable'); }));
+
+      const goSession = '00000000-0000-4000-8000-00000000000c';
+      const goRoute = {
+        aliasId: 'clodex:opencode-go:deepseek-v4.1-flash[1m]',
+        realModelId: 'deepseek-v4.1-flash',
+        displayName: 'DeepSeek V4.1 Flash (OpenCode Go)',
+        upstreamUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'go-key',
+        modelFormat: 'anthropic' as const,
+        providerId: 'opencode-go',
+      };
+      await passthroughHeaders({
+        logName: 'quota-cold-go-turn.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'main',
+        model: goRoute.aliasId,
+      });
+      const cold = await passthroughHeaders({
+        logName: 'quota-cold-side.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'auxiliary',
+      });
+
+      // Claude's reading survives: a stale Claude number is the status quo, while a
+      // blanked banner would be a new failure of the change's own making.
+      expect(cold.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+      expect(cold.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.98');
+      expect(cold.headers['x-clodex-unrelated']).toBe('kept');
+    }, 30_000);
+
+    it('strips them from a Go session, and only then', async () => {
+      const goSession = '00000000-0000-4000-8000-00000000000a';
+      const claudeSession = '00000000-0000-4000-8000-00000000000b';
+      const goRoute = {
+        aliasId: 'clodex:opencode-go:deepseek-v4.1-flash[1m]',
+        realModelId: 'deepseek-v4.1-flash',
+        displayName: 'DeepSeek V4.1 Flash (OpenCode Go)',
+        upstreamUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'go-key',
+        modelFormat: 'anthropic' as const,
+        providerId: 'opencode-go',
+      };
+
+      process.env['CLODEX_TEST_OPENCODE_GO_USAGE'] = GO_USAGE_OVER_THRESHOLD;
+      resetOpenCodeGoUsageCacheForTests();
+
+      // The Go turn is what teaches clodex the session's selected model.
+      await passthroughHeaders({
+        logName: 'quota-go-turn.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'main',
+        model: goRoute.aliasId,
+      });
+
+      const goSide = await passthroughHeaders({
+        logName: 'quota-go-side.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'auxiliary',
+      });
+      expect(goSide.response).toContain('200 OK');
+      // Go's reading replaces Claude's: the held Claude weekly warning is retired
+      // and Go's weekly figure takes its place.
+      expect(goSide.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.84');
+      expect(goSide.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+      expect(goSide.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+      // Claude's plan identity is gone: 0.98 was Claude's figure, not Go's.
+      expect(goSide.headers['anthropic-ratelimit-unified-7d-utilization']).not.toBe('0.98');
+      // Non-quota headers on the same response are untouched.
+      expect(goSide.headers['x-clodex-unrelated']).toBe('kept');
+      expect(goSide.headers['content-type']).toContain('application/json');
+
+      // Under Go's warning threshold: Claude's 98% must still be gone, and Go
+      // must not have invented a warning of its own.
+      process.env['CLODEX_TEST_OPENCODE_GO_USAGE'] = GO_USAGE_UNDER_THRESHOLD;
+      resetOpenCodeGoUsageCacheForTests();
+      const goUnderThreshold = await passthroughHeaders({
+        logName: 'quota-go-under.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'auxiliary',
+      });
+      expect(goUnderThreshold.headers['anthropic-ratelimit-unified-status']).toBe('allowed');
+      expect(goUnderThreshold.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBeUndefined();
+      expect(goUnderThreshold.headers['anthropic-ratelimit-unified-5h-surpassed-threshold']).toBeUndefined();
+      expect(goUnderThreshold.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.09');
+
+      // Switching /model back to a Claude model must restore the Claude plan's
+      // numbers for that session: without this the user is left with no banner
+      // at all while running Claude.
+      await passthroughHeaders({
+        logName: 'quota-revert-turn.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'main',
+        model: 'claude-opus-5',
+      });
+      const afterRevert = await passthroughHeaders({
+        logName: 'quota-after-revert.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'auxiliary',
+      });
+      expect(afterRevert.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+      expect(afterRevert.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+
+      // A session nobody has routed to Go keeps the real Claude plan numbers.
+      const claudeSide = await passthroughHeaders({
+        logName: 'quota-claude-side.jsonl',
+        routes: [goRoute],
+        claudeSessionId: claudeSession,
+        requestClass: 'auxiliary',
+      });
+      expect(claudeSide.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+      expect(claudeSide.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+    }, 30_000);
   });
 
 });
