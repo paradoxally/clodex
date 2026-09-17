@@ -37,7 +37,11 @@ export function replaceClaudeQuotaHeaders(
     }
     kept.push(name, value);
   }
-  if (!sawQuota) return rawHeaders;
+  // Applied even when the response carried no quota headers of its own. The client
+  // keeps raising a warning it observed within the last 30 minutes, so a Go
+  // session must carry Go's readings on every response that reaches the manager --
+  // not only on the ones that happened to arrive with Claude's.
+  if (!sawQuota && Object.keys(replacement).length === 0) return rawHeaders;
   for (const [name, value] of Object.entries(replacement)) kept.push(name, value);
   return kept;
 }

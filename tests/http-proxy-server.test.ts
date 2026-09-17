@@ -2584,6 +2584,8 @@ describe('selective HTTP proxy', () => {
       claudeSessionId: string;
       requestClass?: string;
       model?: string;
+      /** Answer without Claude's own quota headers, as some upstream responses do. */
+      withoutClaudeQuotaHeaders?: boolean;
     }): Promise<{ response: string; headers: Record<string, string> }> {
       const certificates = ensureHttpProxyCertificates();
       let sentHeaders: Record<string, string> = {};
@@ -2594,10 +2596,12 @@ describe('selective HTTP proxy', () => {
         req.resume();
         req.on('end', () => {
           const headers: Record<string, string> = {};
-          for (const name of CLAUDE_QUOTA_HEADERS) headers[name] = 'allowed';
-          headers['anthropic-ratelimit-unified-status'] = 'allowed_warning';
-          headers['anthropic-ratelimit-unified-7d-utilization'] = '0.98';
-          headers['anthropic-ratelimit-unified-7d-surpassed-threshold'] = '0.75';
+          if (!options.withoutClaudeQuotaHeaders) {
+            for (const name of CLAUDE_QUOTA_HEADERS) headers[name] = 'allowed';
+            headers['anthropic-ratelimit-unified-status'] = 'allowed_warning';
+            headers['anthropic-ratelimit-unified-7d-utilization'] = '0.98';
+            headers['anthropic-ratelimit-unified-7d-surpassed-threshold'] = '0.75';
+          }
           headers['x-clodex-unrelated'] = 'kept';
           res.writeHead(200, { 'Content-Type': 'application/json', ...headers });
           res.end('{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}');
@@ -2644,6 +2648,45 @@ describe('selective HTTP proxy', () => {
         await new Promise<void>(resolve => origin.close(() => resolve()));
       }
     }
+
+    it('re-asserts Go\'s window when a response carries no quota headers at all', async () => {
+      // The client keeps raising a warning it observed within the last 30 minutes,
+      // and not every upstream response carries quota headers. A Go session must
+      // therefore receive Go's readings even on a response that brought none of
+      // Claude's, or the held Claude warning survives.
+      process.env['CLODEX_TEST_OPENCODE_GO_USAGE'] = GO_USAGE_OVER_THRESHOLD;
+      resetOpenCodeGoUsageCacheForTests();
+      resetOpenCodeGoSessionStateForTests();
+
+      const goSession = '00000000-0000-4000-8000-00000000000d';
+      const goRoute = {
+        aliasId: 'clodex:opencode-go:deepseek-v4.1-flash[1m]',
+        realModelId: 'deepseek-v4.1-flash',
+        displayName: 'DeepSeek V4.1 Flash (OpenCode Go)',
+        upstreamUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'go-key',
+        modelFormat: 'anthropic' as const,
+        providerId: 'opencode-go',
+      };
+      await passthroughHeaders({
+        logName: 'quota-bare-go-turn.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'main',
+        model: goRoute.aliasId,
+      });
+      const bare = await passthroughHeaders({
+        logName: 'quota-bare-side.jsonl',
+        routes: [goRoute],
+        claudeSessionId: goSession,
+        requestClass: 'auxiliary',
+        withoutClaudeQuotaHeaders: true,
+      });
+
+      expect(bare.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.84');
+      expect(bare.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+      expect(bare.headers['x-clodex-unrelated']).toBe('kept');
+    }, 30_000);
 
     it('leaves the upstream readings alone when Go has no numbers yet', async () => {
       // `getOpenCodeGoLimitHeaders` is synchronous and never awaits its own refresh,
