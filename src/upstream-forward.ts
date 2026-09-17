@@ -116,6 +116,7 @@ export interface RelayAnthropicOptions {
   log?: (message: string) => void;
   claudeCodeSessionId?: string;
   extraHeaders?: Record<string, string>;
+  responseHeaders?: Record<string, string>;
   refreshToken?: (rejectedAccessToken: string) => Promise<string | null>;
   onTokenRefreshed?: (token: string) => void;
   onUpstreamError?: (statusCode: number, body: string) => void;
@@ -199,6 +200,20 @@ export function anthropicSseModelRewrite(override: string): Transform {
   });
 }
 
+/**
+ * The upstream's own usage-limit headers, when it sends any. An Anthropic
+ * passthrough route answers with Claude's real numbers, so dropping them here
+ * would leave the client showing whatever reading it saw last. Synthetic
+ * clodex headers are merged after this, so they win on the routes that set them.
+ */
+function upstreamRateLimitHeaders(headers: Headers): Record<string, string> {
+  const forwarded: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    if (/^anthropic-ratelimit-unified-/i.test(name)) forwarded[name] = value;
+  });
+  return forwarded;
+}
+
 export async function relayAnthropicMessages(
   res: ServerResponse,
   messagesUrl: string,
@@ -234,13 +249,19 @@ export async function relayAnthropicMessages(
     const errBody = await upstreamRes.text();
     options.log?.(`anthropic upstream ${upstreamRes.status}: ${errBody}`);
     options.onUpstreamError?.(upstreamRes.status, errBody);
-    res.writeHead(upstreamRes.status, { 'Content-Type': upstreamRes.headers.get('content-type') || 'application/json' });
+    res.writeHead(upstreamRes.status, {
+      'Content-Type': upstreamRes.headers.get('content-type') || 'application/json',
+    });
     res.end(errBody);
     return;
   }
 
+  const upstreamQuotaHeaders = upstreamRateLimitHeaders(upstreamRes.headers);
+
   if (clientWantsStream && upstreamRes.body) {
     res.writeHead(200, {
+      ...upstreamQuotaHeaders,
+      ...options.responseHeaders,
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
@@ -288,6 +309,8 @@ export async function relayAnthropicMessages(
     text = JSON.stringify(parsed);
   }
   res.writeHead(200, {
+    ...upstreamQuotaHeaders,
+    ...options.responseHeaders,
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(text).toString(),
   });

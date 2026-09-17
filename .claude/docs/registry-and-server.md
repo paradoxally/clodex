@@ -52,6 +52,13 @@ every slot credential for deletion.
 and `/openai/v1` (via `src/openai-adapter.ts`). Wizard/quick-start settings persist to config;
 network mode requires a password; default port 17645 (`--port` overrides).
 
+A successful OpenCode Go Messages response carries the account's real Go usage as Claude Code's
+`anthropic-ratelimit-unified-*` headers (`src/opencode-go-usage.ts`), fetched in the background from
+`/zen/go/v1/usage` and cached per key, with clodex's synthetic set winning over the upstream's own
+on that route. clodex synthesizes nothing on other routes, and the relay forwards an upstream's
+own `anthropic-ratelimit-unified-*` headers on success, so a Claude route keeps Claude's numbers.
+`CLODEX_TEST_OPENCODE_GO_USAGE` stages a reading for testing.
+
 Every inference and count_tokens request builds a client-disconnect controller (`watchClientDisconnect`
 in `src/http-utils.ts`, shared with `src/proxy.ts`) and passes its signal to the upstream call — the
 raw relays' `fetch`, and the SDK adapters' `abortSignal`. The controller is aborted at end of life on

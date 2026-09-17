@@ -94,6 +94,10 @@ doc: `docs/background-agents.md` (shipped via the `docs` entry in package.json `
   `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` **for the child only**. Claude Code may
   persist the model to `~/.claude/settings.json` itself; that is outside clodex's control (reset
   with `claude --model sonnet`).
+- `CLODEX_TEST_OPENCODE_GO_USAGE` overrides the OpenCode Go usage reading with an inlined
+  `/zen/go/v1/usage` payload, so a live Claude Code run shows a chosen Go percentage. Server-local
+  and server-only: it is never forwarded upstream, and it is the only way to stage a high Go reading
+  without a real allowance (`src/opencode-go-usage.ts`).
 - `CLODEX_UPSTREAM_IDLE_TIMEOUT_MS` and `CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS` are resolved by the
   process serving provider requests. `clodex claude` owns that server in-process. With a standalone
   `clodex server`, restart that server with the variables set; putting them only on a

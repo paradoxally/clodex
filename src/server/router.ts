@@ -63,7 +63,8 @@ import {
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
-import { openCodeGoSessionHeaders } from '../data/opencode-go-models.js';
+import { isOpenCodeGoModel, openCodeGoSessionHeaders } from '../data/opencode-go-models.js';
+import { getOpenCodeGoLimitHeaders, refreshOpenCodeGoUsage } from '../opencode-go-usage.js';
 import { anthropicBodyForUpstream } from '../third-party-anthropic-body.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
 
@@ -186,6 +187,10 @@ export async function startServer(options: ServerOptions): Promise<ServerHandle>
   silenceSdkWarnings();
   const languageModelCache: LanguageModelCache = new Map();
   const plog = makeServerLog(options.debugLogPath);
+  for (const model of options.catalog.list()) {
+    if (!isOpenCodeGoModel(model)) continue;
+    void refreshOpenCodeGoUsage(model.apiKey ?? options.apiKey, message => plog(message));
+  }
 
   const server = createServer((req, res) => {
     void routeRequest(req, res, options, languageModelCache, plog);
@@ -362,6 +367,9 @@ async function handleAnthropicMessages(
       : undefined;
 
     plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream}`);
+    const goResponseHeaders = isOpenCodeGoModel(model)
+      ? getOpenCodeGoLimitHeaders(apiKey, message => plog(message))
+      : undefined;
     try {
       await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
         inboundBeta: effectiveBeta,
@@ -369,6 +377,7 @@ async function handleAnthropicMessages(
         log: message => plog(message),
         claudeCodeSessionId,
         extraHeaders: { ...model.headers, ...goSessionHeaders },
+        responseHeaders: goResponseHeaders,
         refreshToken,
         onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
         signal: clientAbort.signal,
@@ -448,6 +457,9 @@ async function handleAnthropicMessages(
     });
     const goSdkSessionHeaders = openCodeGoSessionHeaders(model, claudeSessionId);
     if (goSdkSessionHeaders) params.headers = { ...params.headers, ...goSdkSessionHeaders };
+    const goResponseHeaders = isOpenCodeGoModel(model)
+      ? getOpenCodeGoLimitHeaders(apiKey, message => plog(message))
+      : undefined;
     const clientWantsStream = Boolean(body.stream);
     // Use the display name in the response model field when masking is on — Claude
     // Desktop shows the response model field in its status bar chip, so this surfaces
@@ -471,6 +483,7 @@ async function handleAnthropicMessages(
           const writeStreamChunk = (chunk: string) => {
             if (!res.headersSent) {
               res.writeHead(200, {
+                ...goResponseHeaders,
                 'Content-Type': 'text/event-stream',
                 'Cache-Control': 'no-cache',
                 'Connection': 'keep-alive',
@@ -510,6 +523,9 @@ async function handleAnthropicMessages(
               }),
             }),
           );
+          for (const [name, value] of Object.entries(goResponseHeaders ?? {})) {
+            res.setHeader(name, value);
+          }
           sendJson(res, 200, anthropicResponse);
         }
         break;
