@@ -455,6 +455,33 @@ describe('withoutThinkingBlocks', () => {
     });
   });
 
+  it('removes the thinking block the live endpoint actually returned', () => {
+    // Captured 2026-09-18 from https://opencode.ai/zen/go/v1/messages answering a
+    // non-streaming `deepseek-v4.1-flash` request with `thinking: {type:"adaptive"}`,
+    // fields trimmed to the ones this function reads. The unit cases above are
+    // hand-written; this is the real shape, and it confirms the block really does
+    // arrive carrying text and a signature rather than passing vacuously.
+    const message = {
+      type: 'message',
+      role: 'assistant',
+      model: 'deepseek-v4.1-flash',
+      content: [
+        {
+          type: 'thinking',
+          thinking: 'The user asks to reply with exactly "NONSTREAM-OK". I should comply.',
+          signature: '970e2e93-2e53-4e65-a2fc-02c2c801dfba',
+        },
+        { type: 'text', text: 'NONSTREAM-OK' },
+      ],
+    };
+    expect(withoutThinkingBlocks(message)).toEqual({
+      type: 'message',
+      role: 'assistant',
+      model: 'deepseek-v4.1-flash',
+      content: [{ type: 'text', text: 'NONSTREAM-OK' }],
+    });
+  });
+
   it('returns the same object when there is nothing to remove', () => {
     const message = { type: 'message', content: [{ type: 'text', text: 'hi' }] };
     expect(withoutThinkingBlocks(message)).toBe(message);
