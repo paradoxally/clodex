@@ -1,9 +1,9 @@
 import { Transform } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import {
-  anthropicSseThinkingDisplay,
+  anthropicSseThinkingDrop,
   hidesThinkingText,
-  withoutThinkingText,
+  withoutThinkingBlocks,
 } from '../src/thinking-display.js';
 
 // Claude Code 2.1.273 asks for the chain of thought in two different ways. An
@@ -76,7 +76,7 @@ describe('hidesThinkingText', () => {
   });
 });
 
-describe('anthropicSseThinkingDisplay', () => {
+describe('anthropicSseThinkingDrop', () => {
   const collect = async (transform: Transform, chunks: string[]): Promise<string> => {
     const out: Buffer[] = [];
     transform.on('data', chunk => out.push(Buffer.from(chunk)));
@@ -105,37 +105,135 @@ describe('anthropicSseThinkingDisplay', () => {
     type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'hello' },
   });
 
-  it('drops thinking deltas and keeps the signature that carries the block', async () => {
-    const out = await collect(anthropicSseThinkingDisplay(true), [
+  it('removes the whole thinking block, not just its text', async () => {
+    // The block is what drives Claude Code's thinking spinner: it enters the
+    // state from `content_block_start` and arms a two-second "thought for Ns"
+    // timer when it leaves. An empty block flickers exactly as loudly as a full
+    // one, so the block has to go.
+    const out = await collect(anthropicSseThinkingDrop(true), [
       blockStart + thinkingDelta('secret one ') + thinkingDelta('secret two') + signatureDelta + textDelta,
     ]);
     expect(out).not.toContain('secret one');
     expect(out).not.toContain('secret two');
     expect(out).not.toContain('thinking_delta');
-    expect(out).toContain('"signature":"sig-1"');
+    expect(out).not.toContain('signature_delta');
+    expect(out).not.toContain('"type":"thinking"');
     expect(out).toContain('"text":"hello"');
-    expect(out).toContain('"type":"thinking","thinking":"","signature":""');
+  });
+
+  it('drops the thinking block\'s own stop, which the client would reject', async () => {
+    // Claude Code throws `Content block not found` on a stop for a block it
+    // never saw start, and that throw kills the turn.
+    const thinkingStop = event('content_block_stop', { type: 'content_block_stop', index: 0 });
+    const textStop = event('content_block_stop', { type: 'content_block_stop', index: 1 });
+    const out = await collect(anthropicSseThinkingDrop(true), [
+      blockStart + thinkingDelta('secret') + thinkingStop + textDelta + textStop,
+    ]);
+    // Exactly one stop survives -- the one for the block the client saw start.
+    // `event:` and `type` each spell the name, so one event matches twice.
+    expect(out.match(/event: content_block_stop/g)).toHaveLength(1);
+    expect(out).toContain('"type":"text_delta"');
+  });
+
+  it('renumbers the blocks after the dropped one', async () => {
+    // Claude Code's bundled Anthropic SDK appends each started block to an array
+    // and reads deltas back with `content.at(index)`, so a hole where the
+    // dropped block used to be makes every later delta address nothing and the
+    // model's answer is silently discarded.
+    const out = await collect(anthropicSseThinkingDrop(true), [
+      blockStart + thinkingDelta('secret') + signatureDelta + textDelta,
+    ]);
+    expect(out).toContain('"text":"hello"');
+    expect(out).toContain('"index":0');
+    expect(out).not.toContain('"index":1');
+  });
+
+  it('renumbers a tool block that follows a dropped thinking block', async () => {
+    // The shape every DeepSeek tool call takes: thinking, then the tool call.
+    const toolStart = event('content_block_start', {
+      type: 'content_block_start', index: 1,
+      content_block: { type: 'tool_use', id: 'call_1', name: 'Read', input: {} },
+    });
+    const toolDelta = event('content_block_delta', {
+      type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"x":1}' },
+    });
+    const out = await collect(anthropicSseThinkingDrop(true), [
+      blockStart + thinkingDelta('secret') + signatureDelta + toolStart + toolDelta,
+    ]);
+    expect(out).not.toContain('secret');
+    expect(out).toContain('"type":"tool_use"');
+    // The tool block moves from index 1 to index 0, arguments and all.
+    expect(out).toContain('"index":0');
+    expect(out).not.toContain('"index":1');
+    expect(out).toContain('partial_json":"{\\"x\\":1}"');
+  });
+
+  it('counts dropped blocks per message, not across the whole stream', async () => {
+    // Block indices are scoped to a message. Counting a first message's drops
+    // against a second message's reused indices subtracts twice and emits
+    // `index:-1`, which the client cannot address at all.
+    const messageStart = (id: string) => event('message_start', {
+      type: 'message_start', message: { id },
+    });
+    const first = messageStart('m1') + blockStart + thinkingDelta('secret one') + textDelta;
+    const second = messageStart('m2') + blockStart + thinkingDelta('secret two') + textDelta;
+    const out = await collect(anthropicSseThinkingDrop(true), [first + second]);
+
+    expect(out).not.toContain('secret one');
+    expect(out).not.toContain('secret two');
+    expect(out).not.toContain('"index":-1');
+    // Both answers survive and both are renumbered back to index 0.
+    expect(out.match(/"text":"hello"/g)).toHaveLength(2);
+    expect(out.match(/"index":0/g)).toHaveLength(2);
+  });
+
+  it('leaves a thinking block at a non-zero index and renumbers only what follows', async () => {
+    // Dropping has to be driven by the block's type, not by assuming it is first.
+    const lead = event('content_block_start', {
+      type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' },
+    });
+    const leadDelta = event('content_block_delta', {
+      type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' },
+    });
+    const lateThinking = event('content_block_start', {
+      type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: '', signature: '' },
+    });
+    const lateDelta = event('content_block_delta', {
+      type: 'content_block_delta', index: 1, delta: { type: 'thinking_delta', thinking: 'secret' },
+    });
+    const tailTool = event('content_block_delta', {
+      type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'tail' },
+    });
+    const out = await collect(anthropicSseThinkingDrop(true), [
+      lead + leadDelta + lateThinking + lateDelta + tailTool,
+    ]);
+    expect(out).not.toContain('secret');
+    expect(out).toContain('"text":"hi"');
+    expect(out).toContain('"text":"tail"');
+    // The leading block keeps index 0; the tail moves down to index 1.
+    expect(out).toContain('"index":1');
+    expect(out).not.toContain('"index":2');
   });
 
   it('drops the event line with the data line, leaving no data-less event behind', async () => {
     // An orphaned `event: content_block_delta` is its own defect: the client
     // reads it as an event with no payload.
-    const out = await collect(anthropicSseThinkingDisplay(true), [
+    const out = await collect(anthropicSseThinkingDrop(true), [
       thinkingDelta('secret') + textDelta,
     ]);
     expect(out.match(/event:/g)).toHaveLength(1);
     expect(out).toBe(textDelta);
   });
 
-  it('blanks a thinking block that arrives with its text in content_block_start', async () => {
+  it('drops a thinking block that arrives with its text in content_block_start', async () => {
     const startWithText = event('content_block_start', {
       type: 'content_block_start', index: 0,
       content_block: { type: 'thinking', thinking: 'secret at start', signature: '' },
     });
-    const out = await collect(anthropicSseThinkingDisplay(true), [startWithText]);
+    const out = await collect(anthropicSseThinkingDrop(true), [startWithText + textDelta]);
     expect(out).not.toContain('secret at start');
-    expect(out).toContain('"thinking":""');
-    expect(out).toContain('"type":"content_block_start"');
+    expect(out).not.toContain('"type":"thinking"');
+    expect(out).toContain('"text":"hello"');
   });
 
   it('leaves every other event byte-identical, including tool input', async () => {
@@ -145,12 +243,12 @@ describe('anthropicSseThinkingDisplay', () => {
     const stop = event('content_block_stop', { type: 'content_block_stop', index: 0 });
     const ping = 'event: ping\ndata: {"type":"ping"}\n\n';
     const body = textDelta + toolDelta + stop + ping;
-    expect(await collect(anthropicSseThinkingDisplay(true), [body])).toBe(body);
+    expect(await collect(anthropicSseThinkingDrop(true), [body])).toBe(body);
   });
 
   it('passes the stream through untouched when nothing is hidden', async () => {
     const body = blockStart + thinkingDelta('visible') + signatureDelta;
-    expect(await collect(anthropicSseThinkingDisplay(false), [body])).toBe(body);
+    expect(await collect(anthropicSseThinkingDrop(false), [body])).toBe(body);
   });
 
   it('keeps whatever line endings the upstream used', async () => {
@@ -158,7 +256,7 @@ describe('anthropicSseThinkingDisplay', () => {
       + 'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret"}}\r\n\r\n'
       + 'event: content_block_delta\r\n'
       + 'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}\r\n\r\n';
-    const out = await collect(anthropicSseThinkingDisplay(true), [crlf]);
+    const out = await collect(anthropicSseThinkingDrop(true), [crlf]);
     expect(out).not.toContain('secret');
     expect(out).toContain('"signature":"sig"');
     expect(out.replace(/\r\n/g, '')).not.toContain('\n');
@@ -167,7 +265,7 @@ describe('anthropicSseThinkingDisplay', () => {
   it('drops a thinking delta that is split across chunk boundaries', async () => {
     const whole = thinkingDelta('secret') + textDelta;
     const split = whole.indexOf('secret') + 3;
-    const out = await collect(anthropicSseThinkingDisplay(true), [whole.slice(0, split), whole.slice(split)]);
+    const out = await collect(anthropicSseThinkingDrop(true), [whole.slice(0, split), whole.slice(split)]);
     expect(out).toBe(textDelta);
   });
 
@@ -175,7 +273,7 @@ describe('anthropicSseThinkingDisplay', () => {
     // A relay that buffers until flush stalls the client; the trimmed stream is
     // only correct if it still streams.
     const out: Buffer[] = [];
-    const transform = anthropicSseThinkingDisplay(true);
+    const transform = anthropicSseThinkingDrop(true);
     transform.on('data', chunk => out.push(Buffer.from(chunk)));
     transform.write(Buffer.from(textDelta, 'utf8'));
     await new Promise(resolve => setImmediate(resolve));
@@ -184,7 +282,7 @@ describe('anthropicSseThinkingDisplay', () => {
 
   it('passes a malformed data line through unchanged rather than guessing', async () => {
     const malformed = 'event: content_block_delta\ndata: {"type":"content_block_delta",oops\n\n';
-    const out = await collect(anthropicSseThinkingDisplay(true), [malformed]);
+    const out = await collect(anthropicSseThinkingDrop(true), [malformed]);
     expect(out).toBe(malformed);
   });
 
@@ -194,37 +292,37 @@ describe('anthropicSseThinkingDisplay', () => {
     // payload AND leak the reasoning.
     const cut = 'event: content_block_delta\n'
       + 'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret"}}';
-    expect(await collect(anthropicSseThinkingDisplay(true), [cut])).toBe('');
+    expect(await collect(anthropicSseThinkingDrop(true), [cut])).toBe('');
   });
 
   it('keeps an unterminated event that is not a thinking delta', async () => {
     const cut = 'event: content_block_delta\n'
       + 'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hi"}}';
-    expect(await collect(anthropicSseThinkingDisplay(true), [cut])).toBe(cut);
+    expect(await collect(anthropicSseThinkingDrop(true), [cut])).toBe(cut);
   });
 
   it('drops a thinking delta whose payload is far larger than any buffer', async () => {
     const huge = `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"${'x'.repeat(300000)}"}}\n\n`;
     const ping = 'event: ping\ndata: {"type":"ping"}\n\n';
-    expect(await collect(anthropicSseThinkingDisplay(true), [huge + ping])).toBe(ping);
+    expect(await collect(anthropicSseThinkingDrop(true), [huge + ping])).toBe(ping);
   });
 
-  it('blanks a thinking block whose content_block_start is split over data lines', async () => {
+  it('drops a thinking block whose content_block_start is split over data lines', async () => {
     // The same legal framing as the delta case: deciding per line leaves this
-    // one unparsed, and the reasoning inside content_block reaches the client.
+    // one unparsed, and both the reasoning and the block reach the client.
     const split = 'event: content_block_start\n'
       + 'data: {"type":"content_block_start","index":0,\n'
       + 'data: "content_block":{"type":"thinking","thinking":"secret at start","signature":""}}\n\n';
-    const out = await collect(anthropicSseThinkingDisplay(true), [split]);
+    const out = await collect(anthropicSseThinkingDrop(true), [split + textDelta]);
     expect(out).not.toContain('secret at start');
-    expect(out).toContain('"thinking":""');
-    expect(out).toContain('"type":"content_block_start"');
+    expect(out).not.toContain('"type":"thinking"');
+    expect(out).toContain('"text":"hello"');
   });
 
   it('relays an event too large to hold rather than buffering it without bound', async () => {
     // An upstream that never emits a blank line must not grow this buffer for
     // as long as it runs: past the cap, bytes go out as they arrive.
-    const transform = anthropicSseThinkingDisplay(true);
+    const transform = anthropicSseThinkingDrop(true);
     const out: Buffer[] = [];
     transform.on('data', chunk => out.push(Buffer.from(chunk)));
     const unterminated = 'event: content_block_delta\ndata: ' + 'x'.repeat(1_200_000);
@@ -245,7 +343,7 @@ describe('anthropicSseThinkingDisplay', () => {
   it('filters an event that follows an oversized one in the same chunk', async () => {
     // Everything after the oversized event's terminator belongs to the next
     // event. Relaying it with the oversized one leaks the reasoning.
-    const transform = anthropicSseThinkingDisplay(true);
+    const transform = anthropicSseThinkingDrop(true);
     const out: Buffer[] = [];
     transform.on('data', chunk => out.push(Buffer.from(chunk)));
     const oversized = 'event: content_block_delta\ndata: ' + 'x'.repeat(1_200_000);
@@ -266,7 +364,7 @@ describe('anthropicSseThinkingDisplay', () => {
     // Holding no bytes back across the boundary means the two halves are never
     // seen as one terminator, and every later event is relayed unfiltered for
     // the rest of the stream.
-    const transform = anthropicSseThinkingDisplay(true);
+    const transform = anthropicSseThinkingDrop(true);
     const out: Buffer[] = [];
     transform.on('data', chunk => out.push(Buffer.from(chunk)));
     const oversized = 'event: content_block_delta\ndata: ' + 'x'.repeat(1_200_000);
@@ -287,7 +385,7 @@ describe('anthropicSseThinkingDisplay', () => {
     // The oversized line's own ending is consumed before the cap trips, so it
     // is the first half of the event's terminating blank line. Losing it means
     // the second half arrives alone and filtering never resumes.
-    const transform = anthropicSseThinkingDisplay(true);
+    const transform = anthropicSseThinkingDrop(true);
     const out: Buffer[] = [];
     transform.on('data', chunk => out.push(Buffer.from(chunk)));
     const oversized = 'event: content_block_delta\ndata: ' + 'x'.repeat(1_200_000) + '\n';
@@ -308,7 +406,7 @@ describe('anthropicSseThinkingDisplay', () => {
     const comment = ': keepalive\n\n';
     const multiData = 'event: x\ndata: {"a":1}\ndata: {"b":2}\n\n';
     const body = comment + multiData;
-    expect(await collect(anthropicSseThinkingDisplay(true), [body])).toBe(body);
+    expect(await collect(anthropicSseThinkingDrop(true), [body])).toBe(body);
   });
 
   it('keeps a CRLF split between its CR and its LF across chunks', async () => {
@@ -320,7 +418,7 @@ describe('anthropicSseThinkingDisplay', () => {
       + 'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hi"}}\r\n\r\n';
     const whole = thinking + kept;
     const cut = thinking.indexOf('\r') + 1;   // between the CR and the LF of the event line
-    const out = await collect(anthropicSseThinkingDisplay(true), [whole.slice(0, cut), whole.slice(cut)]);
+    const out = await collect(anthropicSseThinkingDrop(true), [whole.slice(0, cut), whole.slice(cut)]);
     expect(out).not.toContain('secret');
     expect(out).toBe(kept);
   });
@@ -331,17 +429,17 @@ describe('anthropicSseThinkingDisplay', () => {
     const split = 'event: content_block_delta\n'
       + 'data: {"type":"content_block_delta","index":0,\n'
       + 'data: "delta":{"type":"thinking_delta","thinking":"secret"}}\n\n';
-    expect(await collect(anthropicSseThinkingDisplay(true), [split])).toBe('');
+    expect(await collect(anthropicSseThinkingDrop(true), [split])).toBe('');
   });
 
   it('preserves bare-CR framing', async () => {
     const cr = 'event: ping\rdata: {"type":"ping"}\r\r';
-    expect(await collect(anthropicSseThinkingDisplay(true), [cr])).toBe(cr);
+    expect(await collect(anthropicSseThinkingDrop(true), [cr])).toBe(cr);
   });
 });
 
-describe('withoutThinkingText', () => {
-  it('blanks a thinking block in a non-streaming message', () => {
+describe('withoutThinkingBlocks', () => {
+  it('removes a thinking block from a non-streaming message', () => {
     const message = {
       type: 'message',
       model: 'deepseek-v4.1-flash',
@@ -350,27 +448,24 @@ describe('withoutThinkingText', () => {
         { type: 'text', text: 'the answer' },
       ],
     };
-    expect(withoutThinkingText(message)).toEqual({
+    expect(withoutThinkingBlocks(message)).toEqual({
       type: 'message',
       model: 'deepseek-v4.1-flash',
-      content: [
-        { type: 'thinking', thinking: '', signature: 'sig-1' },
-        { type: 'text', text: 'the answer' },
-      ],
+      content: [{ type: 'text', text: 'the answer' }],
     });
   });
 
-  it('returns the same object when there is nothing to blank', () => {
+  it('returns the same object when there is nothing to remove', () => {
     const message = { type: 'message', content: [{ type: 'text', text: 'hi' }] };
-    expect(withoutThinkingText(message)).toBe(message);
+    expect(withoutThinkingBlocks(message)).toBe(message);
     const noContent = { type: 'message' };
-    expect(withoutThinkingText(noContent)).toBe(noContent);
+    expect(withoutThinkingBlocks(noContent)).toBe(noContent);
   });
 
   it('never mutates the message it was given', () => {
     const block = { type: 'thinking', thinking: 'secret', signature: 'sig-1' };
     const message = { type: 'message', content: [block] };
-    withoutThinkingText(message);
+    withoutThinkingBlocks(message);
     expect(block.thinking).toBe('secret');
   });
 });

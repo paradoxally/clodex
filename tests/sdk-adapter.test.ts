@@ -2414,6 +2414,15 @@ describe('hideThinkingText', () => {
     return raw;
   };
 
+  const collectStreamWith = async (hide: boolean, drop: boolean): Promise<string> => {
+    let raw = '';
+    async function* gen() { for (const p of reasoningEvents()) yield p; }
+    await writeAnthropicStream(
+      gen() as any, 'm', c => { raw += c; }, undefined, undefined, undefined, 'opencode-go', hide, drop,
+    );
+    return raw;
+  };
+
   const parsed = (raw: string) => raw.split('\n\n').filter(Boolean).map(block => {
     const [evLine, dataLine] = block.split('\n');
     return { event: evLine.replace('event: ', ''), data: JSON.parse(dataLine.replace('data: ', '')) };
@@ -2542,5 +2551,133 @@ describe('hideThinkingText', () => {
       vi.doUnmock('ai');
       vi.resetModules();
     }
+  });
+});
+
+describe('dropping the thinking block on routes with no round-trip signature', () => {
+  const collect = async (parts: unknown[], args: {
+    origin?: string; hide?: boolean; drop?: boolean;
+  }): Promise<Array<{ event: string; data: any }>> => {
+    let raw = '';
+    async function* gen() { for (const p of parts) yield p; }
+    await writeAnthropicStream(
+      gen() as any, 'm', c => { raw += c; }, undefined, undefined, undefined,
+      args.origin, args.hide, args.drop,
+    );
+    return raw.split('\n\n').filter(Boolean).map(block => {
+      const [evLine, dataLine] = block.split('\n');
+      return { event: evLine.replace('event: ', ''), data: JSON.parse(dataLine.replace('data: ', '')) };
+    });
+  };
+
+  const reasoningEvents = () => [
+    { type: 'start' },
+    { type: 'reasoning-start', id: 'r1', providerMetadata: { openai: { itemId: 'rs_1' } } },
+    { type: 'reasoning-delta', id: 'r1', text: 'Weighing the options.' },
+    { type: 'reasoning-end', id: 'r1', providerMetadata: { openai: { reasoningEncryptedContent: 'enc_1' } } },
+    { type: 'text-start', id: 't1' },
+    { type: 'text-delta', id: 't1', text: 'done' },
+    { type: 'finish', finishReason: 'stop' },
+  ];
+
+  // ── the block goes when nothing can carry the reasoning ────────────────────
+  //
+  // An `@ai-sdk/openai-compatible` route attaches no item identity to its
+  // reasoning, so the signature envelope cannot be built there and the block
+  // carries nothing the next turn needs. Leaving it in place keeps Claude Code
+  // flickering between its thinking state and its "thought for Ns" suffix.
+
+  const compatibleEvents = () => [
+    { type: 'start' },
+    { type: 'reasoning-start', id: 'r1' },
+    { type: 'reasoning-delta', id: 'r1', text: 'the raw reasoning' },
+    { type: 'reasoning-end', id: 'r1' },
+    { type: 'text-start', id: 't1' },
+    { type: 'text-delta', id: 't1', text: 'the answer' },
+    { type: 'finish', finishReason: 'stop' },
+  ];
+
+  const collectCompatible = (hide: boolean, drop: boolean) =>
+    collect(compatibleEvents(), { hide, drop });
+
+  const collectStream = (hide: boolean, drop: boolean) =>
+    collect(reasoningEvents(), { origin: 'opencode-go', hide, drop });
+
+  it('removes the thinking block when the route carries no round-trip signature', async () => {
+    const events = await collectCompatible(true, true);
+    expect(events.some(e => e.event === 'content_block_start' && e.data.content_block.type === 'thinking'))
+      .toBe(false);
+    expect(events.some(e => e.data.delta?.type === 'signature_delta')).toBe(false);
+    expect(events.some(e => e.data.delta?.type === 'thinking_delta')).toBe(false);
+    // The answer survives, and it is the first block the client sees.
+    const textStart = events.find(e => e.event === 'content_block_start' && e.data.content_block.type === 'text')!;
+    expect(textStart.data.index).toBe(0);
+    expect(events.some(e => e.data.delta?.type === 'text_delta' && e.data.delta.text === 'the answer')).toBe(true);
+    // No stop for a block the client never saw start: its parser throws on one.
+    expect(events.filter(e => e.event === 'content_block_stop')).toHaveLength(1);
+  });
+
+  it('keeps the block when the route does carry a round-trip signature', async () => {
+    // The same request on a route whose reasoning replays through the envelope:
+    // the block is the only thing that can carry that signature back upstream,
+    // so it stays even though its text is hidden.
+    const events = await collectStream(true, false);
+    expect(events.some(e => e.event === 'content_block_start' && e.data.content_block.type === 'thinking')).toBe(true);
+    expect(events.some(e => e.data.delta?.type === 'signature_delta')).toBe(true);
+  });
+
+  it('keeps the signature envelope path working when the block is being dropped', async () => {
+    // `dropThinkingBlock` must not reach the envelope carry: an OpenAI item
+    // identity in the stream opens the block regardless, or the reasoning is
+    // silently discarded instead of replayed.
+    const events = await collectStream(true, true);
+    expect(events.some(e => e.event === 'content_block_start' && e.data.content_block.type === 'thinking')).toBe(true);
+    const sig = events.find(e => e.data.delta?.type === 'signature_delta')!.data.delta.signature as string;
+    expect(JSON.parse(sig.slice('clodex:openai-thinking:v1:'.length)).parts[0].text)
+      .toBe('Weighing the options.');
+  });
+
+  it('sets dropThinkingBlock on compatible routes and not on signature-carrying ones', () => {
+    const request = (npm: string) => translateRequest({
+      model: 'm', messages: [{ role: 'user', content: 'hi' }], thinking: { type: 'adaptive' },
+    }, npm as never);
+
+    expect(request('@ai-sdk/openai-compatible').dropThinkingBlock).toBe(true);
+    expect(request('@ai-sdk/openai').dropThinkingBlock).toBeUndefined();
+    expect(request('@ai-sdk/google').dropThinkingBlock).toBeUndefined();
+  });
+
+  it('hides the reasoning on a block-keeping route with no OpenAI item id', async () => {
+    // The google shape: a route the predicate protects because it carries a
+    // thought signature, streaming reasoning that has no OpenAI item id and so
+    // never opens the envelope block. Losing the hide guard here emits the raw
+    // chain of thought AND starts the block -- worse than the bug being fixed.
+    const googleParts = [
+      { type: 'start' },
+      { type: 'reasoning-start', id: 'r1', providerMetadata: { google: { thoughtSignature: 'ts-1' } } },
+      { type: 'reasoning-delta', id: 'r1', text: 'the raw reasoning' },
+      { type: 'reasoning-end', id: 'r1', providerMetadata: { google: { thoughtSignature: 'ts-1' } } },
+      { type: 'text-start', id: 't1' },
+      { type: 'text-delta', id: 't1', text: 'the answer' },
+      { type: 'finish', finishReason: 'stop' },
+    ];
+    for (const drop of [undefined, false]) {
+      const events = await collect(googleParts, { hide: true, drop });
+      // No thinking text, ever. The block itself stays: that route's signature
+      // is the only thing the next turn replays, and this is the shape that
+      // carries it. This is the assertion the restructure lost -- it emitted the
+      // raw text here.
+      expect(events.some(e => e.data.delta?.type === 'thinking_delta')).toBe(false);
+      expect(events.some(e => e.data.delta?.type === 'signature_delta' && e.data.delta.signature === 'ts-1'))
+        .toBe(true);
+      expect(events.some(e => e.data.delta?.type === 'text_delta' && e.data.delta.text === 'the answer')).toBe(true);
+    }
+  });
+
+  it('leaves the block alone entirely when the client did not ask for hidden thinking', async () => {
+    const events = await collectCompatible(false, false);
+    expect(events.some(e => e.event === 'content_block_start' && e.data.content_block.type === 'thinking')).toBe(true);
+    expect(events.some(e => e.data.delta?.type === 'thinking_delta' && e.data.delta.thinking === 'the raw reasoning'))
+      .toBe(true);
   });
 });

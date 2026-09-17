@@ -2397,7 +2397,7 @@ describe('hidden thinking on the endpoint server', () => {
     };
   }
 
-  it('removes the reasoning text a Go route streams, and leaves Claude alone', async () => {
+  it('removes the thinking block a Go route streams, and leaves Claude alone', async () => {
     const upstream = await startSseUpstream();
     handles.push(upstream);
     const server = await startTestServer({
@@ -2423,14 +2423,18 @@ describe('hidden thinking on the endpoint server', () => {
     const go = await request('go-anthropic', { type: 'adaptive' });
     const goBody = await go.text();
     expect(goBody).not.toContain('the raw reasoning');
-    expect(goBody).toContain('"signature":"sig-1"');
+    // This fixture streams nothing but the thinking block, so removing the
+    // block leaves no content block at all. That is the point: an empty block
+    // still drives Claude Code's spinner into its thinking state and out again.
+    expect(goBody).not.toContain('content_block_start');
+    expect(goBody).not.toContain('signature_delta');
 
-    // Claude answers this request itself, so a Go-shaped blanking must not run.
+    // Claude answers this request itself, so a Go-shaped removal must not run.
     const claude = await request('claude-native', { type: 'adaptive' });
     expect(await claude.text()).toContain('the raw reasoning');
   });
 
-  it('removes the reasoning text for the streaming-updates display', async () => {
+  it('removes the thinking block for the streaming-updates display', async () => {
     const upstream = await startSseUpstream();
     handles.push(upstream);
     const server = await startTestServer({
@@ -2451,7 +2455,7 @@ describe('hidden thinking on the endpoint server', () => {
     });
     const body = await response.text();
     expect(body).not.toContain('the raw reasoning');
-    expect(body).toContain('"signature":"sig-1"');
+    expect(body).not.toContain('"type":"thinking"');
   });
 
   it('keeps the reasoning text when the client asked for summaries', async () => {
@@ -2476,7 +2480,7 @@ describe('hidden thinking on the endpoint server', () => {
     expect(await response.text()).toContain('the raw reasoning');
   });
 
-  it('blanks a thinking block in a non-streaming Go response', async () => {
+  it('removes a thinking block in a non-streaming Go response', async () => {
     const upstream = await startUpstream({
       id: 'msg-go-hidden',
       type: 'message',
@@ -2505,7 +2509,6 @@ describe('hidden thinking on the endpoint server', () => {
     });
 
     const body = await response.json() as { content: Array<Record<string, unknown>> };
-    expect(body.content[0]).toEqual({ type: 'thinking', thinking: '', signature: 'sig-1' });
-    expect(body.content[1]).toEqual({ type: 'text', text: 'the answer' });
+    expect(body.content).toEqual([{ type: 'text', text: 'the answer' }]);
   });
 });
