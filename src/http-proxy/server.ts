@@ -20,8 +20,12 @@ import {
   proxyUrlTargetsListener,
 } from '../outbound-proxy.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
+import { isOpenCodeGoModel } from '../data/opencode-go-models.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
+import { replaceClaudeQuotaHeaders } from '../anthropic-quota-header-filter.js';
+import { getOpenCodeGoLimitHeaders } from '../opencode-go-usage.js';
+import { recordSessionModel, sessionUsesOpenCodeGo } from '../opencode-go-session.js';
 import { isOpenAiOAuthRoute, oauthServiceTier } from '../sdk-adapter.js';
 import {
   getLatestMessagePreview,
@@ -254,6 +258,7 @@ function copyResponse(
   res: http.ServerResponse,
   onErrorResponse?: (statusCode: number, body: string) => void,
   onResponseUsage?: (usage: ResponseUsage) => void,
+  transformHeaders?: (rawHeaders: string[]) => string[],
 ): void {
   const statusCode = upstream.statusCode ?? 502;
   const contentType = upstream.headers['content-type'];
@@ -284,7 +289,11 @@ function copyResponse(
     });
     upstream.once('end', () => logErrorResponse());
   }
-  res.writeHead(statusCode, upstream.statusMessage, upstream.rawHeaders);
+  res.writeHead(
+    statusCode,
+    upstream.statusMessage,
+    transformHeaders ? transformHeaders(upstream.rawHeaders) : upstream.rawHeaders,
+  );
   upstream.once('error', err => {
     logErrorResponse(` [stream error: ${err.message}]`);
     res.destroy();
@@ -320,6 +329,12 @@ function forwardRawAnthropicRequest(
     progressIntervalMs: number;
   },
   isLocalShutdown: () => boolean = () => false,
+  /**
+   * Applied to the upstream response header block. A session whose selected model is
+   * served by OpenCode Go must not receive the Claude plan's quota readings: Claude
+   * Code's quota manager has no model identity and its own background calls land here.
+   */
+  transformResponseHeaders?: (rawHeaders: string[]) => string[],
 ): Promise<void> {
   return new Promise(resolve => {
     const startedAt = Date.now();
@@ -436,7 +451,7 @@ function forwardRawAnthropicRequest(
           bytes += chunk.length;
           chunks += 1;
         });
-        copyResponse(upstreamRes, res, onErrorResponse, onResponseUsage);
+        copyResponse(upstreamRes, res, onErrorResponse, onResponseUsage, transformResponseHeaders);
         upstreamRes.once('end', () => {
           responseEnded = true;
           lastActivityAt = Date.now();
@@ -958,6 +973,15 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   }
   const adapterAgent = adapter ? new http.Agent({ keepAlive: true }) : undefined;
   let shuttingDown = false;
+  // Every Go model on this account shares one usage endpoint, so one key answers
+  // for all of them. Resolved once: the catalog cannot change while the proxy runs.
+  const openCodeGoApiKey = options.routes
+    .find(route => isOpenCodeGoModel({
+      providerId: route.providerId,
+      apiBaseUrl: route.baseURL,
+      baseUrl: route.upstreamUrl,
+    }))
+    ?.apiKey;
 
   const mitmServer = https.createServer({
     key: certificates.serverKey,
@@ -1010,6 +1034,29 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         ? extractClaudeSessionId(parsed, claudeSessionIdHeader)
         : undefined;
       const requestedModel = typeof parsed?.model === 'string' ? parsed.model : undefined;
+      const requestClassRaw = req.headers['x-claude-code-request-class'];
+      recordSessionModel({
+        sessionId: claudeSessionId,
+        routedToOpenCodeGo: Boolean(route && isOpenCodeGoModel({
+          providerId: route.providerId,
+          apiBaseUrl: route.baseURL,
+          baseUrl: route.upstreamUrl,
+        })),
+        requestClass: Array.isArray(requestClassRaw) ? requestClassRaw[0] : requestClassRaw,
+      });
+      // Claude Code's quota manager has no model identity, so while a Go model is
+      // selected the Claude plan's readings must not reach it — and Go's must.
+      // Go never serves Claude Code's own background calls, so the only readings
+      // available on this path are Claude's; they are replaced with Go's, which
+      // both retires the Claude warning the client is holding and re-asserts
+      // Go's. A routed request never reaches this call — it returns through the
+      // adapter above, whose reply already carries the same Go headers.
+      const goQuotaForSession = sessionUsesOpenCodeGo(claudeSessionId) && openCodeGoApiKey
+        ? (rawHeaders: string[]) => replaceClaudeQuotaHeaders(
+            rawHeaders,
+            getOpenCodeGoLimitHeaders(openCodeGoApiKey),
+          )
+        : undefined;
       const unresolvedRoutedModel = !route && requestedModel !== undefined && (
         normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)
         || reservedModelIds.has(normalizeRouteLookupId(requestedModel))
@@ -1133,6 +1180,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
             }
           : undefined,
         () => shuttingDown,
+        goQuotaForSession,
       );
       return;
     }

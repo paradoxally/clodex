@@ -1,0 +1,46 @@
+/**
+ * Claude Code's usage-limit banner is driven by `anthropic-ratelimit-unified-*`
+ * on successful Messages responses, and the manager behind it has no model
+ * identity: one reading per process, last response wins, and a window observed
+ * within the last 30 minutes is re-derived from memory rather than left unset
+ * (`recordSeenWindows` / `currentWindows` in the 2.1.273 bundle;
+ * `.claude/docs/claude-code-internals.md`).
+ */
+
+const QUOTA_HEADER_PREFIX = 'anthropic-ratelimit-unified-';
+
+/**
+ * Replace the readings on a response with another provider's.
+ *
+ * Used on a session whose selected model is served by OpenCode Go: Claude
+ * Code's own background calls are Anthropic passthrough traffic, so their
+ * responses would otherwise hand the shared quota manager the Claude plan's
+ * numbers. Deleting the headers is not enough — the held window keeps raising
+ * the banner from memory for 30 minutes, and the client never reads the
+ * response body's model — so the caller substitutes Go's own headers, which
+ * both retire the Claude reading and re-assert Go's.
+ *
+ * Non-quota headers keep their order, values, and any duplicates.
+ */
+export function replaceClaudeQuotaHeaders(
+  rawHeaders: string[],
+  replacement: Record<string, string>,
+): string[] {
+  const kept: string[] = [];
+  let sawQuota = false;
+  for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+    const name = rawHeaders[i];
+    const value = rawHeaders[i + 1];
+    if (name === undefined || value === undefined) continue;
+    if (name.toLowerCase().startsWith(QUOTA_HEADER_PREFIX)) {
+      sawQuota = true;
+      continue;
+    }
+    kept.push(name, value);
+  }
+  if (!sawQuota) return rawHeaders;
+  for (const [name, value] of Object.entries(replacement)) kept.push(name, value);
+  return kept;
+}
+
+export { QUOTA_HEADER_PREFIX };

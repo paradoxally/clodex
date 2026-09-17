@@ -514,3 +514,43 @@ Captured pairs (bypass mode, 2.1.273; identical on 2.1.267 and 2.1.270 where mar
 - **A zero-usage symptom in the client is upstream's.** clodex floors `input_tokens` with
   `estimateAnthropicInputTokens` on both translation paths and retains it at `finish`; the client's
   usage merge is last-non-zero-wins and yields the assistant event once.
+
+## The quota manager is one per process and has no model identity (verified 2.1.273, darwin-arm64)
+
+The usage-limit banner ("You've used 98% of your weekly limit · resets …") comes from
+`anthropic-ratelimit-unified-*` on **successful Messages responses**. There is no model field anywhere
+in the chain: `Dar` (the process-wide manager behind `Gb`) keeps one `currentLimits` plus a
+`lastSeenWindows` map, and the last successful response wins.
+
+**Where the values come from.** `avt` → `Gb.extractQuotaStatusFromHeaders` is called from the response
+handler in the streaming loop, for both the main turn and background calls. `gvt` returns `null`
+unless `anthropic-ratelimit-unified-status` or `-overage-status` is present, so a response carrying
+neither is inert.
+
+**What actually raises the banner.** `allowed_warning` is normalized to `allowed` on ingest
+(`Qe.status = r === "allowed_warning" ? "allowed" : r`). The signal is the per-window
+`-surpassed-threshold`, or `utilization` plus elapsed time against `rRs` (5h: 0.90 with ≤72% of the
+window elapsed; 7d: 0.75/0.60, 0.50/0.35, or 0.25/0.15). `tRs` renders `You've used {n}% of your
+{limit}` for `five_hour`/`seven_day`/`seven_day_opus`/`seven_day_sonnet`/`seven_day_overage_included`;
+`o$` labels them. The render floor is `kar = 0.7`.
+
+**A stripped reading is not inert — the held window keeps it alive.** `recordSeenWindows` stores each
+window with an `observedAtMs`, and `currentWindows` re-derives from `lastSeenWindows` for anything
+observed within `sRs = 30 minutes`. `deriveTrackedLimits` runs that re-derivation (`xar`, the
+`tengu_sharded_moonbeam` flag) even when the current response carried no quota headers. So a Go
+session that receives the Claude plan's numbers once keeps showing the Claude banner for up to 30
+minutes after those headers stop arriving. Replacing the headers with an inert `allowed` status is an
+observation that retires the warning; deleting them is not.
+
+**Background calls carry the same session id as the main turn.** Claude Code's title generation and
+side queries reach the proxy as passthrough requests with `x-claude-code-request-class: auxiliary`
+(0 tools) and the *same* `x-claude-code-session-id` as the `main` turn, so they cannot be attributed
+by session id alone. `main` + `claude-haiku-4-5-*` is a real user turn and must be left alone.
+
+**`/api/oauth/usage` does not drive this banner.** It populates `cachedUsageUtilization`, read only by
+`mQe` (`/usage` and the status line) and only when `sU()` has no `five_hour`/`seven_day` window. Its
+path spellings are `plain`, `at_wall` (`?at_wall=1&skip_spend=1`) and `cedar_ember`
+(`?cedar_ember=1&skip_spend=1`). Answering it locally would not change the limit banner.
+
+**Do not synthesize `rejected`.** It sends the client down its quota-error path, which replaces the
+provider's message and offers Claude-only recovery actions (upgrade, usage credits).
