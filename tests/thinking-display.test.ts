@@ -283,6 +283,27 @@ describe('anthropicSseThinkingDisplay', () => {
     expect(Buffer.concat(out).toString('utf8')).not.toContain('secret');
   });
 
+  it('clears the oversized state when the blank line follows the oversized line ending', async () => {
+    // The oversized line's own ending is consumed before the cap trips, so it
+    // is the first half of the event's terminating blank line. Losing it means
+    // the second half arrives alone and filtering never resumes.
+    const transform = anthropicSseThinkingDisplay(true);
+    const out: Buffer[] = [];
+    transform.on('data', chunk => out.push(Buffer.from(chunk)));
+    const oversized = 'event: content_block_delta\ndata: ' + 'x'.repeat(1_200_000) + '\n';
+    const thinking = 'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret"}}\n\n';
+    transform.write(Buffer.from(oversized, 'utf8'));
+    transform.write(Buffer.from('\n', 'utf8'));
+    transform.write(Buffer.from(thinking, 'utf8'));
+    await new Promise<void>((resolve, reject) => {
+      transform.on('end', resolve);
+      transform.on('error', reject);
+      transform.end();
+    });
+
+    expect(Buffer.concat(out).toString('utf8')).not.toContain('secret');
+  });
+
   it('passes comment lines and multi-line payloads through with their framing', async () => {
     const comment = ': keepalive\n\n';
     const multiData = 'event: x\ndata: {"a":1}\ndata: {"b":2}\n\n';

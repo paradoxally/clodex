@@ -223,9 +223,16 @@ export function anthropicSseThinkingDisplay(hide: boolean): Transform {
     // The cap covers everything held for this event. A single line longer than
     // the cap never reaches `handleLine`, so it has to be checked here too.
     if (tail.length + current.length > MAX_BUFFERED_EVENT_CHARS) {
-      out += current + tail;
+      // The line ending that closed the oversized line is already in here, and
+      // it is half of the blank line that will end the event. Hold it back, or
+      // the overflow branch sees the second half alone, never matches a
+      // terminator, and relays every later event unfiltered.
+      const flushed = current + tail;
+      const ending = /(?:\r\n|\r|\n)$/.exec(flushed)?.[0] ?? '';
+      out += ending ? flushed.slice(0, -ending.length) : flushed;
       current = '';
       tail = '';
+      carry = ending;
       overflowed = true;
     }
     return out;
