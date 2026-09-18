@@ -34,6 +34,7 @@ import {
   resolveClaudeBinaryForPatch,
 } from '../src/patcher.js';
 import { installProvenancePath, readInstallProvenance } from '../src/patch-backup.js';
+import { HOOK_BANNER_ANCHORS } from './fixtures/claude-bundle.js';
 import { LEGACY_LAUNCHERS, NATIVE_LAUNCHERS } from './helpers/npm-launchers.js';
 
 const NATIVE_PLACEHOLDER_BYTES = readFileSync(fileURLToPath(
@@ -87,6 +88,9 @@ const PRISTINE_BUNDLE = [
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
   // PATCH 8a/8b/8c/9 anchors — these sites are REQUIRED (applyPatch throws when
   // any of them FAILs), so the fixture has to carry them or every patch aborts.
+  // PATCH 11 and 12 are required too, and unconditional — no config can turn them
+  // off — so an absent anchor here aborts the whole command, not one site.
+  ...HOOK_BANNER_ANCHORS,
   'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}',
   'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return!1}',
   'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',

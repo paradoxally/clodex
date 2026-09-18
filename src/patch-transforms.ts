@@ -93,8 +93,43 @@ import {
  * the alias. Every existing config hash changes regardless, because `name` and
  * `provider` joined it; the bump follows the rule that a changed replacement
  * bumps.
+ *
+ * 14 — PATCH 11 and PATCH 12 are new sites, and they are what stops the spinner
+ * line flashing `running PreToolUse hook` for a hook that finished in 20 ms. Two
+ * sites rather than one because the fix needs both ends of one data path: the
+ * batch record gains a start time, and the renderer refuses to draw the banner
+ * before that start time is old enough. Neither is configurable, so unlike every
+ * other site these run for every install — which is also why the bump matters
+ * here more than usual: without it, a user whose favorites never change keeps a
+ * binary that still flashes, forever.
  */
-export const PATCH_TRANSFORMS_VERSION = 13;
+export const PATCH_TRANSFORMS_VERSION = 14;
+
+/**
+ * How long a hook must have been running before its banner is drawn on the
+ * spinner line.
+ *
+ * Measured on 2026-09-18 with a real Claude Code 2.1.273 under clodex, spinner
+ * line sampled every 1.5 ms through a pty: the real Orca hook config produced 16
+ * banner appearances at ~32 ms each, a `sleep 0.02` hook 18 at ~57 ms, and a hook
+ * backgrounded with `( sleep 1.2 ) &` 12 at ~35 ms. So the flash is not the hook's
+ * duration — it is one render frame per hook, whatever the hook does.
+ *
+ * 500 ms is 9-15x the longest flash measured. It is emitted as a literal into BOTH
+ * sites from this one constant, so the writer and the reader cannot disagree about
+ * it. It lives here, not in a module of its own, because the source-digest guard
+ * in `tests/patcher.test.ts` hashes this file (and `network-env.ts`) and a
+ * constant placed anywhere else would be emitted into the bundle unseen.
+ *
+ * The slow end was confirmed the same way, against a `sleep 1.5` PreToolUse hook:
+ * the patched binary shows the banner where the unpatched one does, so the delay
+ * does not cost a reader the signal that something is running. Note what that run
+ * actually showed — three appearances of 645, 269 and 57 ms against the unpatched
+ * build's two of 590 ms — because a spinner repaints the whole line, so a visible
+ * run is sampled shorter than the hook that caused it. The point is that it still
+ * appears; a hook's real length is not recoverable from this measurement.
+ */
+export const HOOK_BANNER_DELAY_MS = 500;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -693,6 +728,199 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         /(function [\w$]+\(([\w$]+)\)\{)(return [\w$]+\([\w$]+\(\2\)\)\?\.default_effort\?\?"high"\})/,
         (_m, head, arg, body) => head! + snippet(arg!) + body!,
         { required: false },
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 11 — hook batch start time, and the tick that reveals the banner.
+  //
+  // Claude Code draws `running PreToolUse hook` as the spinner's suffix. The
+  // suffix comes from one function (PATCH 12 below), fed by this one: a tracker
+  // that publishes a record per hook batch, `{hookEvent,hooks,settled,agentId}`.
+  // There is no time in that record and nowhere else on the path — the per-hook
+  // `Date.now()` reads all live in the executor and are consumed only to stamp
+  // `durationMs` on an ALREADY-FINISHED hook. So the start time has to be added
+  // here, at the only writer.
+  //
+  // The timer is here for the same reason, and it is the whole reason this is two
+  // sites rather than one. PATCH 12's gate reads the clock, and the renderer
+  // memoises its selector on `(snapshot, selectorFn)`:
+  //   `if(e.last!==null&&e.last.snapshot===n&&e.last.select===s)return e.last.selected`
+  // so once the banner has been drawn, or declined, it is not recomputed until
+  // the snapshot OBJECT changes. A clock read alone would freeze: a hook that
+  // blocks for a minute would never start showing. Passing a fresh selector each
+  // render is the other way to force recomputation and it is the wrong one — it
+  // makes `getSnapshot` non-idempotent, which is the documented footgun for the
+  // hook this wrapper is built on. So the recomputation is delivered the way the
+  // renderer already expects it: one `setState` at the threshold, with a new
+  // array, changing the snapshot identity exactly once per batch. The cost is one
+  // wakeup per hook, not a frame loop.
+  //
+  // `startedAt` needs no care in `settle`: that branch does `{...<entry>,...}`,
+  // so the field survives a settle untouched. It does need `clearTimeout` on the
+  // `[Symbol.dispose]` arm, or a batch that finishes early leaves a timer holding
+  // a store reference until it fires.
+  //
+  // Identity is carried two ways, because neither is enough alone. The anchor
+  // itself is the whole factory, so it can only match a function of that exact
+  // shape; and the record literal inside it is counted across the whole bundle
+  // first, because "matched once" says one candidate survived, not that it was
+  // the right one. The record's own identity is that `hookEvent`, `hooks` and
+  // `agentId` all read names the parameter DESTRUCTURED — a bare object literal
+  // cannot satisfy that.
+  // ---------------------------------------------------------------------------
+  {
+    const patchName = 'PATCH 11: hook banner start time';
+    const marker = '/*ccpatch:hook-banner*/';
+    const delay = String(HOOK_BANNER_DELAY_MS);
+    // Named capture groups, and a source joined from fragments rather than one
+    // literal — both unusual for this file and both for the same reason. This
+    // anchor spells seven identifiers more than once each and the replacement
+    // REORDERS them, which is what numbered back-references cannot survive: a
+    // mis-numbered one still compiles, matches nothing, and reports as "anchor
+    // not found" — the error that otherwise means Claude Code moved the site. A
+    // numeric escape is a second trap in the same place, because `'\6'` in a
+    // plain string is an octal escape, not a back-reference to group six.
+    const anchor = new RegExp([
+      '(?<head>function [\\w$]+\\(\\{hookEvent:(?<event>[\\w$]+),hooks:(?<hooks>[\\w$]+),agentId:(?<agent>[\\w$]+)\\}\\)\\{let )',
+      '(?<decl>(?<store>[\\w$]+)=(?<factory>[\\w$]+)\\(\\),(?<entry>[\\w$]+)=\\{hookEvent:\\k<event>,hooks:\\k<hooks>,settled:new Set,agentId:\\k<agent>\\};)',
+      '(?<publish>return \\k<store>\\.setState\\(\\((?<prev>[\\w$]+)\\)=>\\[\\.\\.\\.\\k<prev>,\\k<entry>\\]\\),)',
+      '(?<settle>\\{settle:\\((?<settled>[\\w$]+)\\)=>\\k<store>\\.setState\\(\\((?<mutate>[\\w$]+)\\)=>\\{let (?<at>[\\w$]+)=\\k<mutate>\\.indexOf\\(\\k<entry>\\);)',
+      '(?<guard>if\\(\\k<at>===-1\\|\\|\\k<entry>\\.settled\\.has\\(\\k<settled>\\)\\)return \\k<mutate>;)',
+      '(?<mark>return \\k<entry>=\\{\\.\\.\\.\\k<entry>,settled:new Set\\(\\k<entry>\\.settled\\)\\.add\\(\\k<settled>\\)\\},\\k<mutate>\\.toSpliced\\(\\k<at>,1,\\k<entry>\\)\\}\\),)',
+      '(?<disposeHead>\\[Symbol\\.dispose\\]:\\(\\)=>\\k<store>\\.setState\\(\\((?<cleanup>[\\w$]+)\\)=>\\{)',
+      '(?<disposeDrop>let (?<drop>[\\w$]+)=\\k<cleanup>\\.indexOf\\(\\k<entry>\\);)',
+      '(?<disposeRest>return \\k<drop>===-1\\?\\k<cleanup>:\\k<cleanup>\\.toSpliced\\(\\k<drop>,1\\)\\}\\)\\})',
+      '(?<close>\\})',
+    ].join(''));
+    // Counted against the ORIGINAL source, like PATCH 10: PATCH 4 and PATCH 5
+    // splice user-supplied text into `js` before this runs, and a model
+    // configured with a name shaped like this literal must not be able to
+    // manufacture a second one.
+    //
+    // `startedAt` is optional BECAUSE this counter also runs on a re-run, where
+    // `source` already carries the patch this very site wrote. Requiring the
+    // unpatched spelling made a second `clodex patch` refuse the binary the first
+    // one had just produced.
+    const recordLiterals = source.match(
+      /hookEvent:[\w$]+,hooks:[\w$]+,settled:new Set,agentId:[\w$]+(?:,startedAt:Date\.now\(\))?\};/g,
+    ) ?? [];
+    if (recordLiterals.length !== 1) {
+      log('FAIL', patchName, 'hook batch record appears ' + recordLiterals.length + ' times (expected 1)');
+      fail('clodex patch: required patch failed: ' + patchName);
+    }
+    applyOnce(
+      patchName,
+      anchor,
+      (_match, ...rest) => {
+        const g = rest[rest.length - 1] as unknown as Record<string, string>;
+        // A fresh array on the tick: the renderer memoises on the snapshot's
+        // IDENTITY, so mutating it in place would not recompute the suffix.
+        return marker + g.head
+          // `startedAt` is spliced into the record rather than added after it, so
+          // `settle`'s `{...<entry>,...}` spread carries it for free.
+          + '_ccHookBannerTimer,' + g.store + '=' + g.factory + '(),'
+          + g.entry + '={hookEvent:' + g.event + ',hooks:' + g.hooks + ',settled:new Set,agentId:'
+          + g.agent + ',startedAt:Date.now()};'
+          + g.publish
+          + '_ccHookBannerTimer=setTimeout(()=>' + g.store + '.setState(' + g.prev
+          + '=>' + g.prev + '.slice()),' + delay + '),'
+          + g.settle + g.guard + g.mark
+          + g.disposeHead
+          + 'clearTimeout(_ccHookBannerTimer);' + g.disposeDrop
+          + g.disposeRest + g.close;
+      },
+      { marker, required: true },
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 12 — hide the hook banner until the batch is old enough.
+  //
+  // This is the gate PATCH 11's start time exists for. The function renders the
+  // spinner suffix, and its return value is what the reader sees flash.
+  //
+  // The comparison fails OPEN on purpose: a record with no `startedAt` gives
+  // `NaN`, `NaN < n` is false, and the banner draws exactly as it does on an
+  // unpatched binary. That is what makes PATCH 11 safe to lose — a build whose
+  // tracker anchor drifted still shows a banner, it just shows it always. The
+  // alternative, treating a missing start time as "young", would silently drop
+  // the banner for every hook the moment the two sites fell out of step.
+  //
+  // A hook carrying `statusMessage` is exempt from the delay. That field is the
+  // one piece of this text a user deliberately chose, and suppressing their own
+  // label for half a second to hide a generic string they never asked for is the
+  // wrong trade.
+  //
+  // Deliberately NOT the elapsed duration in the text. The function has a free
+  // slot for it — `Se` is bound to `""` and never reassigned, so `${Se}` is
+  // always empty — but a value that changes on every render is exactly what
+  // makes a snapshot function unstable, and the spinner already carries a turn
+  // timer two characters to the right. Adding it is a separate change with its
+  // own reason.
+  //
+  // Anchor runs from the function head through the null-guard, and stops there:
+  // the guard is the ONLY thing inserted against, and the loops after it are
+  // what identify the function, so consuming them keeps the anchor specific
+  // without making the replacement depend on their spelling. `Fjt` is reused as
+  // a name in two unrelated scopes in 2.1.273, so the name alone identifies
+  // nothing — the body is the discriminator. Measured: 78 bytes, unique.
+  // ---------------------------------------------------------------------------
+  {
+    const patchName = 'PATCH 12: hook banner delay';
+    const marker = '/*ccpatch:hook-banner-gate*/';
+    const delay = String(HOOK_BANNER_DELAY_MS);
+    if (js.includes(marker)) {
+      log('SKIP', patchName, 'already patched');
+    } else {
+      // Counted against the ORIGINAL source, for the reason PATCH 10 states: by the
+      // time this runs, PATCH 4 and PATCH 5 have spliced USER-SUPPLIED model labels
+      // into `js`, and a label shaped like this anchor would make the count read 2
+      // and refuse the whole patch — with nothing wrong in Claude Code to find.
+      // `source` cannot carry that text.
+      //
+      // What this does NOT close: `applyOnce` still matches against `js`, so a label
+      // crafted as this minified function would make it ambiguous and abort the
+      // patch. That is the same boundary PATCH 10 has, it fails in the loud
+      // direction, and reaching it means pasting Claude Code's own minified source
+      // into a model label — so it is left as-is rather than buying a lookahead that
+      // would make the anchor depend on the statement BELOW it.
+      const anchors = source.match(
+        /function (?:[\w$]+)\((?<arg>[\w$]+)\)\{let (?<entry>[\w$]+)=\k<arg>\.findLast\(\((?<item>[\w$]+)\)=>\k<item>\.agentId===void 0\);if\(!\k<entry>\)return null;/g,
+      ) ?? [];
+      if (anchors.length !== 1) {
+        log('FAIL', patchName, 'hook banner builder appears ' + anchors.length + ' times (expected 1)');
+        fail('clodex patch: required patch failed: ' + patchName);
+      }
+    }
+    if (!js.includes(marker)) {
+      applyOnce(
+        patchName,
+        /(?<head>function [\w$]+\((?<arg>[\w$]+)\)\{let (?<entry>[\w$]+)=\k<arg>\.findLast\(\((?<item>[\w$]+)\)=>\k<item>\.agentId===void 0\);if\(!\k<entry>\)return null;)/,
+        (_match, ...rest) => {
+          const g = rest[rest.length - 1] as unknown as Record<string, unknown>;
+          const entry = g.entry as string;
+          // The gate must not shadow the hook's OWN spinner text. `statusMessage` is
+          // a documented hook field, and it is the one thing on this path a user
+          // deliberately chose to see, so it is exempt: a hook carrying one shows
+          // immediately, exactly as it does unpatched.
+          //
+          // The exemption is the branch below's OWN expression, not an
+          // approximation of it: `hooks.find((hook, index) => !settled.has(index))`
+          // then `?.statusMessage`. Two earlier attempts asked a LOOSER question
+          // ("any hook with a label", then "any UNSETTLED hook with a label") and a
+          // review caught both, because the renderer only ever inspects the FIRST
+          // unsettled hook: a batch where that one is unlabelled but a later one
+          // carries a message still draws the generic banner, which is exactly the
+          // string this site exists to hide. Mirroring the expression rather than
+          // paraphrasing it is what makes the two agree by construction.
+          return g.head! as string + marker + 'if(Date.now()-' + entry
+            + '.startedAt<' + delay + '&&!' + entry
+            + '.hooks.find(function(_h,_i){return !' + entry
+            + '.settled.has(_i)})?.statusMessage)return null;';
+        },
+        { marker, required: true },
       );
     }
   }

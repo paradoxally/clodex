@@ -57,8 +57,10 @@ cat > "$TMP/ok.err" <<'EOF'
   OK   PATCH 8b: xhigh effort capability
   OK   PATCH 8c: max effort capability
   OK   PATCH 9: default effort
+  OK   PATCH 11: hook banner start time
+  OK   PATCH 12: hook banner delay
   OK   PATCH 10: child network environment
-clodex patch: 11 applied, 0 skipped, 0 failed
+clodex patch: 13 applied, 0 skipped, 0 failed
 EOF
 cat > "$TMP/ok.out" <<'EOF'
 │
@@ -66,7 +68,7 @@ cat > "$TMP/ok.out" <<'EOF'
 EOF
 run_case 0 "$TMP/ok.out" "$TMP/ok.err"
 check "clean run has no reasons" EMPTY
-check_sites "clean run parses 11 sites" '{"PATCH 1: Agent tool model enum":"OK","PATCH 3: known-alias validator list":"OK","PATCH 6: alias resolver switch":"OK","PATCH 5: model picker options":"OK","PATCH 4: Agent tool model description":"OK","PATCH 7: per-model context window":"OK","PATCH 8a: effort capability":"OK","PATCH 8b: xhigh effort capability":"OK","PATCH 8c: max effort capability":"OK","PATCH 9: default effort":"OK","PATCH 10: child network environment":"OK"}'
+check_sites "clean run parses 13 sites" '{"PATCH 1: Agent tool model enum":"OK","PATCH 3: known-alias validator list":"OK","PATCH 6: alias resolver switch":"OK","PATCH 5: model picker options":"OK","PATCH 4: Agent tool model description":"OK","PATCH 7: per-model context window":"OK","PATCH 8a: effort capability":"OK","PATCH 8b: xhigh effort capability":"OK","PATCH 8c: max effort capability":"OK","PATCH 9: default effort":"OK","PATCH 11: hook banner start time":"OK","PATCH 12: hook banner delay":"OK","PATCH 10: child network environment":"OK"}'
 
 # 2. Optional site failed but the patch still published — exit 0, so ONLY the report reveals it.
 cat > "$TMP/opt.err" <<'EOF'

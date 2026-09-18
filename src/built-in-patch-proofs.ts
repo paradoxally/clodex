@@ -162,6 +162,22 @@ export function captureBuiltInPatchProofs(
     'PATCH 9: default effort',
     /\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
   );
+  // PATCH 11's marker sits at the head of the function it rewrites, so it cannot
+  // be the proof — the point of a proof is to say what the patch ADDED. The record
+  // literal is that: a local patch could drop `startedAt` and leave the marker
+  // standing.
+  addPattern(
+    'PATCH 11: hook banner start time',
+    /\{hookEvent:[\w$]+,hooks:[\w$]+,settled:new Set,agentId:[\w$]+,startedAt:Date\.now\(\)\};/,
+  );
+  addPattern(
+    'PATCH 12: hook banner delay',
+    // Tolerant of what sits between the comparison and the return, so adding the
+    // statusMessage exemption did not silently stop this proof matching — which
+    // would have made every local patch report "could not capture built-in
+    // postconditions" instead of failing anywhere near the cause.
+    /\/\*ccpatch:hook-banner-gate\*\/if\(Date\.now\(\)-[\w$]+\.startedAt<\d+[^)]*\)[^;]*return null;/, 
+  );
   addPattern(
     'PATCH 10: child network environment',
     /\/\*ccpatch:child-network-env\*\/let _clodexChildEnv=process\.env,[\s\S]*?catch\(_clodexError\)\{\}\}/,
