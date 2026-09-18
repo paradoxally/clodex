@@ -395,9 +395,20 @@ tweakcc's own repack reads back as an ordinary module name.
   runs again when the source already carries the patch this very site wrote. Requiring the pristine
   spelling made a second `clodex patch` reject the binary the first one had just produced, with
   "anchor not found" — the error that reads like Claude Code having moved the site. Any whole-bundle
-  discriminator for a site that REWRITES that same text has to accept the patched form too. PATCH 5
-  and PATCH 10 sidestep this by counting against `source`, the original, but that only helps a site
-  whose counted text is not the text it rewrites.
+  discriminator for a site that REWRITES that same text has to accept the patched form too. PATCH 5,
+  PATCH 10 and PATCH 12 all sidestep this by counting against `source`, the original, but that only
+  helps a site whose counted text is not the text it rewrites.
+- **A whole-bundle count is a guard against USER-SUPPLIED text, and only if it runs against
+  `source`.** Everything a user types into a model label reaches the bundle before the later sites
+  run: PATCH 4 splices `display` into the Agent-tool description, and PATCH 5 splices names and
+  providers into the picker rows. PATCH 12 counted its anchor against `js` rather than `source`, so a
+  label shaped like the hook-banner builder made the count read 2 and aborted the whole patch — a
+  config-only denial of service with no bug in Claude Code to find. Note what counting against
+  `source` does NOT buy: `applyOnce` still matches against `js`, so a label deliberately crafted as
+  Claude Code's own minified source still makes the anchor ambiguous and aborts. That is the same
+  boundary PATCH 10 has, it fails in the loud direction, and closing it would mean constraining what
+  FOLLOWS the anchor — which is what drifted in 2.1.242 and cost PATCH 4 its matches. Fail loud, and
+  say so, rather than making an anchor depend on the statement below it.
 
 - **The eight published builds of one Claude Code version are eight different bundles, and a
   minified identifier is not stable across them.** 2.1.238 named the `/model` picker's builder
