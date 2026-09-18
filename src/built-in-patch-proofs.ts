@@ -172,7 +172,11 @@ export function captureBuiltInPatchProofs(
   );
   addPattern(
     'PATCH 12: hook banner delay',
-    /\/\*ccpatch:hook-banner-gate\*\/if\(Date\.now\(\)-[\w$]+\.startedAt<\d+\)return null;/,
+    // Tolerant of what sits between the comparison and the return, so adding the
+    // statusMessage exemption did not silently stop this proof matching — which
+    // would have made every local patch report "could not capture built-in
+    // postconditions" instead of failing anywhere near the cause.
+    /\/\*ccpatch:hook-banner-gate\*\/if\(Date\.now\(\)-[\w$]+\.startedAt<\d+[^)]*\)[^;]*return null;/, 
   );
   addPattern(
     'PATCH 10: child network environment',

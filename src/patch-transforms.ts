@@ -848,6 +848,11 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // alternative, treating a missing start time as "young", would silently drop
   // the banner for every hook the moment the two sites fell out of step.
   //
+  // A hook carrying `statusMessage` is exempt from the delay. That field is the
+  // one piece of this text a user deliberately chose, and suppressing their own
+  // label for half a second to hide a generic string they never asked for is the
+  // wrong trade.
+  //
   // Deliberately NOT the elapsed duration in the text. The function has a free
   // slot for it — `Se` is bound to `""` and never reassigned, so `${Se}` is
   // always empty — but a value that changes on every render is exactly what
@@ -894,9 +899,23 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         patchName,
         /(?<head>function [\w$]+\((?<arg>[\w$]+)\)\{let (?<entry>[\w$]+)=\k<arg>\.findLast\(\((?<item>[\w$]+)\)=>\k<item>\.agentId===void 0\);if\(!\k<entry>\)return null;)/,
         (_match, ...rest) => {
-          const g = rest[rest.length - 1] as unknown as Record<string, string>;
-          return g.head! + marker + 'if(Date.now()-' + g.entry
-            + '.startedAt<' + delay + ')return null;';
+          const g = rest[rest.length - 1] as unknown as Record<string, unknown>;
+          const entry = g.entry as string;
+          // The gate must not shadow the hook's OWN spinner text. `statusMessage` is
+          // a documented hook field, and it is the one thing on this path a user
+          // deliberately chose to see, so it is exempt: a hook carrying one shows
+          // immediately, exactly as it does unpatched.
+          //
+          // Asked as "does any hook in this batch carry one" rather than repeating
+          // the branch below, which looks for the first UNSETTLED hook's
+          // `statusMessage`. The two agree in every ordinary case and differ only
+          // for a batch where a settled hook has a label and an unsettled one does
+          // not — where this errs toward SHOWING the banner, the harmless
+          // direction. Duplicating the branch's own expression here would put a
+          // second copy of it in the bundle for upstream to reshape independently.
+          return g.head! as string + marker + 'if(Date.now()-' + entry
+            + '.startedAt<' + delay + '&&!' + entry
+            + '.hooks.some(function(_h){return _h.statusMessage}))return null;';
         },
         { marker, required: true },
       );

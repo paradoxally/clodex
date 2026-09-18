@@ -669,7 +669,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 14,
-      digest: '25a7fd3b070c236bdcd7c3d437b590c31df390d074ea96545e68c65ed0e3c691',
+      digest: 'bc615dc59ed5923589a7809d4110fbaadba46df6b991ea89307219bd5a395b01',
     });
   });
 });
@@ -3240,19 +3240,30 @@ describe('patch script identity naming', () => {
       expect(render(record(undefined))).toBe('running PreToolUse hook');
     });
 
-    it('leaves a hook with a settled status message its own text', () => {
-      // Over-scope negative: the statusMessage branch is a separate return the
-      // delay must not shadow once the threshold has passed.
+    it('shows a hook\'s own status message immediately, however young the batch', () => {
+      // `statusMessage` is the one piece of this text a user deliberately chose, so
+      // the delay must not shadow it. A review caught the first version doing
+      // exactly that — suppressing a user's own label for half a second to hide a
+      // generic string they never asked for.
       const render = suffix();
-      const withStatus = [{
+      const withStatus = (ago: number) => [{
         agentId: undefined,
         hooks: [{ command: 'x', statusMessage: 'Compacting' }],
         settled: new Set<number>(),
         hookEvent: 'PreCompact',
-        startedAt: Date.now() - 5_000,
+        startedAt: Date.now() - ago,
       }];
 
-      expect(render(withStatus)).toBe('Compacting\u2026');
+      expect(render(withStatus(0))).toBe('Compacting\u2026');
+      expect(render(withStatus(100))).toBe('Compacting\u2026');
+      expect(render(withStatus(5_000))).toBe('Compacting\u2026');
+    });
+
+    it('still hides a young batch whose hooks carry no status message', () => {
+      // The negative side of the exemption: without a label the generic banner is
+      // still suppressed, so the exemption did not become "always show".
+      const render = suffix();
+      expect(render(record(Date.now() - 100))).toBeNull();
     });
 
     it('refuses when the batch record is duplicated, and says so on the site line', () => {
