@@ -3255,6 +3255,27 @@ describe('patch script identity naming', () => {
       expect(render(withStatus)).toBe('Compacting\u2026');
     });
 
+    it('refuses when the batch record is duplicated, and says so on the site line', () => {
+      // The whole-bundle count is what catches this, and it has to run BEFORE the
+      // anchor, because `applyOnce` alone would report the ambiguity without
+      // naming what was ambiguous.
+      const duplicated = CLAUDE_FIXTURE.replace(
+        'function hookSuffix(h){',
+        'var extra={hookEvent:a,hooks:b,settled:new Set,agentId:c};\nfunction hookSuffix(h){',
+      );
+      expect(duplicated).not.toBe(CLAUDE_FIXTURE);
+
+      try {
+        applyClodexPatches(duplicated, config);
+        throw new Error('expected the duplicate record to abort the patch');
+      } catch (error) {
+        const failure = error as PatchApplyError;
+        expect(failure.message).toMatch(/PATCH 11: hook banner start time/);
+        expect(failure.results.find(r => r.name.startsWith('PATCH 11'))?.extra)
+          .toBe('hook batch record appears 2 times (expected 1)');
+      }
+    });
+
     it('names the failure when either anchor drifts, and refuses to publish', () => {
       const trackerDrift = CLAUDE_FIXTURE.replace(
         'let st=store(),e={hookEvent:a,hooks:b,settled:new Set,agentId:c}',
