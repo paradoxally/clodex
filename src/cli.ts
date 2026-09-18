@@ -640,6 +640,10 @@ ${pc.bold('Options:')}
   --disable-local-patches    Disable local patches and rebuild without them
 
 ${pc.bold('Behavior:')}
+  The patch also hides the hook banner until a hook has run for half a
+  second, so a hook that finishes in milliseconds never makes the spinner
+  line flash.
+
   The patch map is built automatically from your clodex favorites and aliases
   (clodex models); context windows come from provider metadata. A pristine
   per-version backup is kept, and a manifest (~/.clodex/patch-state.json)

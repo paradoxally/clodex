@@ -58,6 +58,11 @@ export const EXPECTED_PATCH_SITES = Object.freeze([
   'PATCH 8b: xhigh effort capability',
   'PATCH 8c: max effort capability',
   'PATCH 9: default effort',
+  // These two are unconditional — nothing in PROBE_PATCH_CONFIG turns them on,
+  // and nothing turns them off — so they are the pair the probe would keep
+  // reporting long after a config-gated site had been dropped from the list.
+  'PATCH 11: hook banner start time',
+  'PATCH 12: hook banner delay',
   'PATCH 10: child network environment',
 ]);
 

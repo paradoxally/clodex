@@ -505,6 +505,55 @@ Captured pairs (bypass mode, 2.1.273; identical on 2.1.267 and 2.1.270 where mar
 | Grep `head_limit:"5"` | unchanged | 273 |
 | Edit `{file_path,old_string,new_string}` | `+ "replace_all":false` | 267/270/273 |
 
+## The hook banner is one render frame per hook, whatever the hook does (verified 2.1.273, darwin-arm64)
+
+`running PreToolUse hook` is drawn dim inside the spinner's parentheses, as the spinner's *suffix*:
+`✻ Doing things… (running PreToolUse hook · 12s · 1.2k tokens)`. Read out of a real 2.1.273 bundle.
+
+**Measured 2026-09-18 through a real Claude Code on a pty, spinner line sampled every 1.5 ms** (the
+same harness the thinking-spinner work used). With every hook disabled: **0** appearances. With the
+real Orca hook config: **16**, each visible ~32 ms. A hook whose command is `sleep 0.02`: 18, ~57 ms
+median. A hook backgrounded with `( sleep 1.2 ) & printf '{}\n'`: 12, ~35 ms each. One with the
+`async: true` field: 15. **So the banner's duration is not the hook's duration** — shortening the
+hook does not remove the flash and backgrounding does not either.
+
+**The data path.** The suffix comes from one function, `Fjt` in the extracted bundle
+(`function Fjt(h){let E=h.findLast((Re)=>Re.agentId===void 0);…}`; 332 bytes, unique). It has exactly
+one caller — `let Ojt=Me(MGo,Fjt)` in the component `Ame` — and its return value becomes the
+spinner's `spinnerSuffix` prop. Its records come from `PZe`, a `using`-scoped tracker:
+
+```js
+function PZe({hookEvent:e,hooks:n,agentId:r}){let s=j_o(),d={hookEvent:e,hooks:n,settled:new Set,agentId:r};return s.setState((h)=>[...h,d]),{settle:(h)=>…,[Symbol.dispose]:()=>…}}
+```
+
+**There is no time anywhere on that path.** The record holds `hookEvent`, `hooks`, `settled` and
+`agentId`; `settle` only grows a `Set`. The per-hook `Date.now()` reads all live in the *executor*
+(`let …=Date.now()` at the top of each hook's run) and are consumed only to stamp `durationMs` on an
+already-finished hook's attachment. A wrapper therefore cannot gate the banner from outside the
+bundle — the start time has to be added at the writer.
+
+**The gate cannot simply read the clock, because the selector is memoised.** `Me` is a caching
+`useSyncExternalStore` wrapper:
+
+```js
+if(o!==null&&o.snapshot===n&&o.select===s)return o.selected
+```
+
+The snapshot (the record array) changes only on create, settle and dispose, so a `Date.now()` read
+inside `Fjt` is computed at those three moments and frozen in between — a hook that blocks for a
+minute would never start showing. Handing the hook a fresh selector each render is the other way to
+force recomputation, and it is the wrong one: it makes `getSnapshot` non-idempotent, the documented
+footgun for that hook. The re-render has to arrive as a real snapshot change, which is why the
+banner delay is two patch sites rather than one.
+
+**`statusMessage` is a documented hook field** on every hook variant in the settings schema
+(`"Custom status message to display in spinner while hook runs"`), read by `pZe` and honoured by
+`Fjt`'s early return. It is set by the user, so it is not a lever clodex can use.
+
+**The tool timer is the precedent for a gate.** `Vn` refuses to show `running tool for 12s` until
+`if(l>=2000)` in both directions. That `2000` is an inline bare literal, not a named constant —
+mirroring it means spelling the number, not `2e3`.
+
 ## Things that looked like clodex bugs and were not (not version-specific)
 
 - **"Concurrent subagents died at turn 2" was not unknown-model classification.** The agents' first

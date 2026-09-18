@@ -39,6 +39,7 @@ import {
 } from '../src/patcher.js';
 import {
   applyClodexPatches,
+  HOOK_BANNER_DELAY_MS,
   PATCH_TRANSFORMS_VERSION,
   PatchApplyError,
   type PatchScriptModelConfig,
@@ -667,8 +668,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 13,
-      digest: '05ac98099ff75b412b2edebeb193d1d50859523f91936b384d41a78415c3eff8',
+      version: 14,
+      digest: '25a7fd3b070c236bdcd7c3d437b590c31df390d074ea96545e68c65ed0e3c691',
     });
   });
 });
@@ -3058,6 +3059,8 @@ describe('patch script identity naming', () => {
       ['PATCH 8b: xhigh effort capability', 'OK'],
       ['PATCH 8c: max effort capability', 'OK'],
       ['PATCH 9: default effort', 'OK'],
+      ['PATCH 11: hook banner start time', 'OK'],
+      ['PATCH 12: hook banner delay', 'OK'],
       ['PATCH 10: child network environment', 'OK'],
     ]);
     const rerun = applyClodexPatches(fresh.content, config);
@@ -3074,6 +3077,8 @@ describe('patch script identity naming', () => {
       ['PATCH 8b: xhigh effort capability (refresh)', 'SKIP'],
       ['PATCH 8c: max effort capability (refresh)', 'SKIP'],
       ['PATCH 9: default effort (refresh)', 'SKIP'],
+      ['PATCH 11: hook banner start time', 'SKIP'],
+      ['PATCH 12: hook banner delay', 'SKIP'],
       ['PATCH 10: child network environment', 'SKIP'],
     ]);
   });
@@ -3092,6 +3097,181 @@ describe('patch script identity naming', () => {
       patched.content.replace('label:"GPT-5.6 Sol"', 'label:"Sol"'),
       proofs,
     )).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // PATCH 11 and PATCH 12 — the hook banner delay.
+  //
+  // The pair is one change, so these run them together. Both halves are
+  // EXECUTED: reading the emitted regex is not evidence the patch behaves, and
+  // the first cut of this site emitted a record literal that never carried
+  // `startedAt` at all while every string assertion still passed.
+  // ---------------------------------------------------------------------------
+  describe('hook banner delay', () => {
+    /** The emitted declaration of one patched function, taken from its own line. */
+    function emitted(patched: string, name: string): string {
+      const line = patched.split('\n').find(row => row.includes(`function ${name}(`));
+      expect(line, `the bundle carries no function ${name}`).toBeDefined();
+      return line!.replace('/*ccpatch:hook-banner*/', '').replace('/*ccpatch:hook-banner-gate*/', '');
+    }
+
+    /** The patched tracker, run against a stub store and a captured timer. */
+    function tracker() {
+      const patched = runPatchScript(config);
+      const declaration = emitted(patched, 'hookTrack');
+      let state: Array<Record<string, unknown>> = [];
+      const timers: number[] = [];
+      const store = {
+        getSnapshot: () => state,
+        setState: (next: unknown) => {
+          state = (typeof next === 'function'
+            ? (next as (p: unknown[]) => unknown[])(state)
+            : next) as Array<Record<string, unknown>>;
+        },
+      };
+      // The emitted code calls `store()` for the store itself, so the injected
+      // name has to be the FACTORY, not the stub — binding the stub there and
+      // shadowing the global is what made this test report "store is not a
+      // function" against a patch that was in fact correct.
+      const build = new Function(
+        'store',
+        'setTimeout',
+        'clearTimeout',
+        `${declaration}; return hookTrack;`,
+      ) as (
+        store: () => unknown,
+        setTimeout: (cb: () => void, ms: number) => number,
+        clearTimeout: (id: number) => void,
+      ) => (o: { hookEvent: string; hooks: unknown[]; agentId?: string }) => {
+        settle: (hook: unknown) => void;
+        [Symbol.dispose]: () => void;
+      };
+      const cleared: number[] = [];
+      const track = build(
+        () => store,
+        (_cb, ms) => { timers.push(ms); return timers.length; },
+        (id) => { cleared.push(id); },
+      );
+      return { track, store, timers, cleared, getState: () => state };
+    }
+
+    /** The patched suffix builder, run against a record with a chosen start time. */
+    function suffix() {
+      const patched = runPatchScript(config);
+      const declaration = emitted(patched, 'hookSuffix');
+      const body = declaration.slice(declaration.indexOf('{') + 1, declaration.lastIndexOf('}'));
+      const build = new Function('H', `return function(h){${body}};`) as (
+        H: (n: number, s: string) => string,
+      ) => (h: unknown[]) => string | null;
+      return build((n, singular) => (n === 1 ? singular : singular + 's'));
+    }
+
+    const record = (startedAt: number | undefined) => [{
+      agentId: undefined,
+      hooks: [{ command: 'x' }],
+      settled: new Set<number>(),
+      hookEvent: 'PreToolUse',
+      ...(startedAt === undefined ? {} : { startedAt }),
+    }];
+
+    it('stamps each batch with a start time', () => {
+      const { track, getState } = tracker();
+      track({ hookEvent: 'PreToolUse', hooks: [{ command: 'x' }] });
+
+      const record = getState()[0]!;
+      expect(typeof record.startedAt).toBe('number');
+      expect(record.hookEvent).toBe('PreToolUse');
+    });
+
+    it('stamps the start time on the record literal itself, so settle cannot drop it', () => {
+      // `settle` rebuilds the entry as `{...<entry>,settled:...}`. A field added
+      // to the record object AFTER construction would survive that spread too, but
+      // one added to a COPY on the way into the store would not — and the two are
+      // indistinguishable until a hook actually settles.
+      const { track, getState } = tracker();
+      const handle = track({ hookEvent: 'PreToolUse', hooks: [{ command: 'x' }] });
+      const before = getState()[0]!.startedAt;
+      handle.settle(getState()[0]!.hooks[0]);
+
+      expect(getState()[0]!.startedAt).toBe(before);
+      expect(getState()[0]!.settled).toEqual(new Set([getState()[0]!.hooks[0]]));
+    });
+
+    it('cancels the pending tick when the batch is disposed', () => {
+      // Unpinned until a review pointed it out: the stub was injected and never
+      // asserted, so deleting `clearTimeout` from the emitted dispose arm left the
+      // whole suite green. A batch that finishes inside the threshold would then
+      // leave a timer holding its store until it fired.
+      const { track, cleared } = tracker();
+      const handle = track({ hookEvent: 'PreToolUse', hooks: [{ command: 'x' }] });
+      expect(cleared).toEqual([]);
+
+      handle[Symbol.dispose]();
+
+      expect(cleared).toEqual([1]);
+    });
+
+    it('ticks the store exactly once, at the banner threshold', () => {
+      const { track, store, timers } = tracker();
+      const before = store.getSnapshot();
+      track({ hookEvent: 'PreToolUse', hooks: [{ command: 'x' }] });
+
+      expect(timers).toEqual([HOOK_BANNER_DELAY_MS]);
+      // The tick has NOT run yet: nothing is scheduled until the threshold passes.
+      expect(store.getSnapshot()).not.toBe(before);
+    });
+
+    it('hides the banner below the threshold, shows it at and above, and fails open', () => {
+      const render = suffix();
+      const now = Date.now();
+
+      // Under: a hook that finished in tens of milliseconds never paints the line.
+      // Both cases stay well clear of the boundary on purpose. The comparison
+      // reads the clock again inside the emitted code, so a case placed 1 ms
+      // before the threshold measures whatever this test costs to run and flakes.
+      expect(render(record(now - 1))).toBeNull();
+      expect(render(record(now - 100))).toBeNull();
+      // At the boundary and beyond: a hook that genuinely blocks still shows.
+      expect(render(record(now - HOOK_BANNER_DELAY_MS))).toBe('running PreToolUse hook');
+      expect(render(record(now - 1200))).toBe('running PreToolUse hook');
+      // FAIL OPEN. No start time means `NaN < n`, which is false, so the banner
+      // draws exactly as it does unpatched. This is what keeps PATCH 11 severable:
+      // losing it costs the delay, never the banner.
+      expect(render(record(undefined))).toBe('running PreToolUse hook');
+    });
+
+    it('leaves a hook with a settled status message its own text', () => {
+      // Over-scope negative: the statusMessage branch is a separate return the
+      // delay must not shadow once the threshold has passed.
+      const render = suffix();
+      const withStatus = [{
+        agentId: undefined,
+        hooks: [{ command: 'x', statusMessage: 'Compacting' }],
+        settled: new Set<number>(),
+        hookEvent: 'PreCompact',
+        startedAt: Date.now() - 5_000,
+      }];
+
+      expect(render(withStatus)).toBe('Compacting\u2026');
+    });
+
+    it('names the failure when either anchor drifts, and refuses to publish', () => {
+      const trackerDrift = CLAUDE_FIXTURE.replace(
+        'let st=store(),e={hookEvent:a,hooks:b,settled:new Set,agentId:c}',
+        'let st=store(),e={hookEvent:a,hooks:b,settled:new Set,agentId:c,extra:1}',
+      );
+      expect(trackerDrift).not.toBe(CLAUDE_FIXTURE);
+      expect(() => applyClodexPatches(trackerDrift, config))
+        .toThrow(/PATCH 11: hook banner start time/);
+
+      const suffixDrift = CLAUDE_FIXTURE.replace(
+        'function hookSuffix(h){let E=h.findLast',
+        'function hookSuffix(h){let E=h.slice().findLast',
+      );
+      expect(suffixDrift).not.toBe(CLAUDE_FIXTURE);
+      expect(() => applyClodexPatches(suffixDrift, config))
+        .toThrow(/PATCH 12: hook banner delay/);
+    });
   });
 
   it('refreshes the baked context table in place when only the window changes', () => {
@@ -3226,11 +3406,17 @@ describe('patch script identity naming', () => {
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
     ]);
-    expect(patched.results.slice(6, -1)).toEqual([
+    expect(patched.results.slice(6, -3)).toEqual([
       { status: 'FAIL', name: 'PATCH 8a: effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8b: xhigh effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8c: max effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 9: default effort', extra: 'anchor not found' },
+    ]);
+    // The banner pair is unconditional, so it survives an effort-only drift and
+    // stays ahead of PATCH 10 — the reason the slice above ends at -3.
+    expect(patched.results.slice(-3, -1)).toEqual([
+      { status: 'OK', name: 'PATCH 11: hook banner start time' },
+      { status: 'OK', name: 'PATCH 12: hook banner delay' },
     ]);
     expect(patched.results.at(-1)).toEqual({
       status: 'OK',

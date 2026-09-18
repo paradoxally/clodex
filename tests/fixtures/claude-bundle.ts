@@ -31,6 +31,31 @@ export function contextResolver(modelParam: string, windowParam: string): string
     + `if(EHi(${modelParam},${windowParam}))return Dve;return $Ac(${modelParam},${windowParam})}`;
 }
 
+/**
+ * The hook-batch tracker and the spinner-suffix builder, as Claude Code 2.1.273
+ * minifies them. PATCH 11 rewrites the first and PATCH 12 gates the second.
+ *
+ * Every identifier is deliberately a DIFFERENT letter from the real bundle's, so
+ * a transform that spells one out instead of capturing it fails here. `Fjt`'s
+ * real name is reused in two unrelated scopes in 2.1.273, which is why PATCH 12's
+ * anchor carries the body rather than the name — the fixture keeps the shape that
+ * makes that necessary without pretending to be the whole bundle.
+ */
+export const HOOK_BANNER_ANCHORS = [
+  // PATCH 11's anchor. `agentId:b` binds to a parameter the head destructured, and
+  // `settle` reaches the entry by identity — both are what identify the site.
+  'function hookTrack({hookEvent:a,hooks:b,agentId:c}){let st=store(),e={hookEvent:a,hooks:b,settled:new Set,agentId:c};'
+  + 'return st.setState((p)=>[...p,e]),{settle:(p)=>st.setState((q)=>{let i=q.indexOf(e);'
+  + 'if(i===-1||e.settled.has(p))return q;return e={...e,settled:new Set(e.settled).add(p)},q.toSpliced(i,1,e)}),'
+  + '[Symbol.dispose]:()=>st.setState((p)=>{let i=p.indexOf(e);return i===-1?p:p.toSpliced(i,1)})}}',
+  // PATCH 12's anchor. The `let ... findLast ... if(!X)return null;` run is the
+  // discriminator; `Se=""` is the dead suffix slot the real bundle also carries.
+  'function hookSuffix(h){let E=h.findLast((R)=>R.agentId===void 0);if(!E)return null;'
+  + 'let O=E.hooks.length,ee=O>1?`\\u2026 ${E.settled.size}/${O}`:"",ne=E.hooks.find((R,I)=>!E.settled.has(I));'
+  + 'if(ne?.statusMessage)return`${ne.statusMessage}${ee||"\\u2026"}`;'
+  + 'let Se="",we=Se?"hook":H(O,"hook");return`running ${E.hookEvent} ${we}${Se}${ee}`}',
+];
+
 export const CLAUDE_CORE_FIXTURE = [
   ENUM_AND_DESCRIPTION,
   'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
@@ -39,6 +64,7 @@ export const CLAUDE_CORE_FIXTURE = [
   CONTEXT_RESOLVER,
   'function cwdOf(){let p=process.env.PWD;return p}',
   'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
+  ...HOOK_BANNER_ANCHORS,
 ].join('\n');
 
 export const CLAUDE_FIXTURE = [

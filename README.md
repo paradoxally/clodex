@@ -200,6 +200,8 @@ Patch the installed Claude Code binary so clodex favorites and aliases are first
 
 On Windows, when Claude Code was installed with `npm install -g`, the `claude` on your PATH is a small launcher script (`claude.cmd`, `claude.ps1`, and an extensionless one) rather than the program itself; `clodex patch` follows it to the program and patches that. (On macOS and Linux npm makes a symlink instead, which always worked.) If the launcher cannot be followed — its program moved or removed, or it names two different programs — `clodex patch` stops without touching anything and tells you to set `TWEAKCC_CC_INSTALLATION_PATH` to the program directly.
 
+`clodex patch` also stops the hook banner flashing. Every hook Claude Code runs — even one that finishes in 20 ms — makes the spinner line read `running PreToolUse hook` for a frame or two. A patched binary hides that line until a hook has actually been running for half a second, so a quick hook never paints it and a hook that genuinely blocks for a second still shows it. Nothing to configure.
+
 The patch map is built from your favorites and aliases; context windows come from provider metadata. A pristine per-version backup is kept — recorded against the install it was made for, so a machine with two installs of one Claude Code version restores each from its own bytes — and a manifest (`~/.clodex/patch-state.json`) makes re-runs no-ops until your config or Claude Code version changes — then the binary is restored first and re-patched fresh. `clodex claude` checks patch freshness at launch and offers to re-patch (a non-blocking notice when not interactive). Re-run `clodex patch` after every `claude` update.
 
 #### Local patches (trusted code)
