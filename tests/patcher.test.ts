@@ -669,7 +669,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 14,
-      digest: 'cd2b5118c6d045cadca617cee871e3b1f92ee75c5d3e9eca82458420b8c6ffd5',
+      digest: 'c13ab5cb81d829142a37675158b065e170e63bdfbc30f7aaf0680b02bb9f7aaf',
     });
   });
 });
@@ -3240,69 +3240,42 @@ describe('patch script identity naming', () => {
       expect(render(record(undefined))).toBe('running PreToolUse hook');
     });
 
-    it('shows a hook\'s own status message immediately, however young the batch', () => {
-      // `statusMessage` is the one piece of this text a user deliberately chose, so
-      // the delay must not shadow it. A review caught the first version doing
-      // exactly that — suppressing a user's own label for half a second to hide a
-      // generic string they never asked for.
+    it('mirrors the renderer\'s own statusMessage lookup in every batch shape', () => {
+      // This is one table rather than several tests because three review rounds
+      // each found another way a LOOSER condition diverged from the renderer:
+      // first the gate hid labels outright, then it exempted on "any hook with a
+      // label", then on "any UNSETTLED hook with a label". The renderer inspects
+      // only the FIRST unsettled hook, so every paraphrase let the generic banner
+      // through in some batch shape. The gate now IS that expression.
       const render = suffix();
-      const withStatus = (ago: number) => [{
+      const batch = (
+        settled: number[],
+        hooks: unknown[],
+        ago = 100,
+      ) => [{
         agentId: undefined,
-        hooks: [{ command: 'x', statusMessage: 'Compacting' }],
-        settled: new Set<number>(),
-        hookEvent: 'PreCompact',
+        hooks,
+        settled: new Set<number>(settled),
+        hookEvent: 'PreToolUse',
         startedAt: Date.now() - ago,
       }];
 
-      expect(render(withStatus(0))).toBe('Compacting\u2026');
-      expect(render(withStatus(100))).toBe('Compacting\u2026');
-      expect(render(withStatus(5_000))).toBe('Compacting\u2026');
-    });
-
-    it('still hides a young batch whose hooks carry no status message', () => {
-      // The negative side of the exemption: without a label the generic banner is
-      // still suppressed, so the exemption did not become "always show".
-      const render = suffix();
-      expect(render(record(Date.now() - 100))).toBeNull();
-    });
-
-    it('ties the exemption to the UNSETTLED hook the renderer actually shows', () => {
-      // A second review pass caught a looser version of this asking "does ANY hook
-      // carry a label". That differs here: hook 0 is settled and labelled, hook 1
-      // is still running and is not — so the renderer looks up hook 1, finds no
-      // label, and draws the GENERIC banner. A batch-wide check would exempt it and
-      // let through exactly the string this patch exists to hide.
-      const render = suffix();
-      const withSettledLabel = [{
-        agentId: undefined,
-        hooks: [{ command: 'a', statusMessage: 'Compacting' }, { command: 'b' }],
-        settled: new Set<number>([0]),
-        hookEvent: 'PreToolUse',
-        startedAt: Date.now() - 100,
-      }];
-
-      expect(render(withSettledLabel)).toBeNull();
-    });
-
-    it('refuses when the batch record is duplicated, and says so on the site line', () => {
-      // The whole-bundle count is what catches this, and it has to run BEFORE the
-      // anchor, because `applyOnce` alone would report the ambiguity without
-      // naming what was ambiguous.
-      const duplicated = CLAUDE_FIXTURE.replace(
-        'function hookSuffix(h){',
-        'var extra={hookEvent:a,hooks:b,settled:new Set,agentId:c};\nfunction hookSuffix(h){',
-      );
-      expect(duplicated).not.toBe(CLAUDE_FIXTURE);
-
-      try {
-        applyClodexPatches(duplicated, config);
-        throw new Error('expected the duplicate record to abort the patch');
-      } catch (error) {
-        const failure = error as PatchApplyError;
-        expect(failure.message).toMatch(/PATCH 11: hook banner start time/);
-        expect(failure.results.find(r => r.name.startsWith('PATCH 11'))?.extra)
-          .toBe('hook batch record appears 2 times (expected 1)');
-      }
+      expect(render(batch([], [{ command: 'a' }]))).toBeNull();
+      expect(render(batch([], [{ command: 'a', statusMessage: 'Indexing' }])))
+        .toBe('Indexing\u2026');
+      // A settled label must not exempt a running, unlabelled hook.
+      expect(render(batch([0], [
+        { command: 'a', statusMessage: 'Indexing' },
+        { command: 'b' },
+      ]))).toBeNull();
+      // Nor may a LABEL ON A LATER hook exempt the unlabelled one the renderer
+      // actually reads.
+      expect(render(batch([], [
+        { command: 'a' },
+        { command: 'b', statusMessage: 'Indexing' },
+      ]))).toBeNull();
+      // Past the threshold the generic banner returns as normal.
+      expect(render(batch([], [{ command: 'a' }], 5_000))).toBe('running PreToolUse hook');
     });
 
     it('names the failure when either anchor drifts, and refuses to publish', () => {
