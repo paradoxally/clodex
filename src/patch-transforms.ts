@@ -906,16 +906,17 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           // deliberately chose to see, so it is exempt: a hook carrying one shows
           // immediately, exactly as it does unpatched.
           //
-          // Asked as "does any hook in this batch carry one" rather than repeating
-          // the branch below, which looks for the first UNSETTLED hook's
-          // `statusMessage`. The two agree in every ordinary case and differ only
-          // for a batch where a settled hook has a label and an unsettled one does
-          // not — where this errs toward SHOWING the banner, the harmless
-          // direction. Duplicating the branch's own expression here would put a
-          // second copy of it in the bundle for upstream to reshape independently.
+          // The exemption asks the SAME question the branch below asks — "the first
+          // UNSETTLED hook" — rather than "any hook in the batch". Those differ
+          // when a settled hook carries a label and a still-running one does not:
+          // the renderer looks up the unsettled hook, finds no label, and draws the
+          // GENERIC banner, so a looser exemption would let exactly the string this
+          // patch exists to hide back through. Both conditions are needed — an
+          // unsettled hook whose `statusMessage` is truthy.
           return g.head! as string + marker + 'if(Date.now()-' + entry
             + '.startedAt<' + delay + '&&!' + entry
-            + '.hooks.some(function(_h){return _h.statusMessage}))return null;';
+            + '.hooks.some(function(_h,_i){return !' + entry
+            + '.settled.has(_i)&&_h.statusMessage}))return null;';
         },
         { marker, required: true },
       );

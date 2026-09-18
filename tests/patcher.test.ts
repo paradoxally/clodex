@@ -669,7 +669,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 14,
-      digest: 'bc615dc59ed5923589a7809d4110fbaadba46df6b991ea89307219bd5a395b01',
+      digest: 'cd2b5118c6d045cadca617cee871e3b1f92ee75c5d3e9eca82458420b8c6ffd5',
     });
   });
 });
@@ -3264,6 +3264,24 @@ describe('patch script identity naming', () => {
       // still suppressed, so the exemption did not become "always show".
       const render = suffix();
       expect(render(record(Date.now() - 100))).toBeNull();
+    });
+
+    it('ties the exemption to the UNSETTLED hook the renderer actually shows', () => {
+      // A second review pass caught a looser version of this asking "does ANY hook
+      // carry a label". That differs here: hook 0 is settled and labelled, hook 1
+      // is still running and is not — so the renderer looks up hook 1, finds no
+      // label, and draws the GENERIC banner. A batch-wide check would exempt it and
+      // let through exactly the string this patch exists to hide.
+      const render = suffix();
+      const withSettledLabel = [{
+        agentId: undefined,
+        hooks: [{ command: 'a', statusMessage: 'Compacting' }, { command: 'b' }],
+        settled: new Set<number>([0]),
+        hookEvent: 'PreToolUse',
+        startedAt: Date.now() - 100,
+      }];
+
+      expect(render(withSettledLabel)).toBeNull();
     });
 
     it('refuses when the batch record is duplicated, and says so on the site line', () => {
