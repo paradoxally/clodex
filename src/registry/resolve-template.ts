@@ -79,10 +79,19 @@ export function retainedOpenCodeGoTemplate(): ProviderTemplate | undefined {
  */
 export function openCodeGoPinnedApiUrl(npm: string): string | null {
   if (npm === '@ai-sdk/openai-compatible') return OPENCODE_GO_COMPLETIONS_BASE_URL;
-  // Responses models: the OpenAI SDK appends /responses to the same /v1 base.
-  if (npm === '@ai-sdk/openai') return OPENCODE_GO_COMPLETIONS_BASE_URL;
   if (npm === '@ai-sdk/anthropic') return OPENCODE_GO_ANTHROPIC_BASE_URL;
   return null;
+}
+
+/**
+ * The destination for one CATALOG MODEL's package. Wider than the provider
+ * record's pin above: Responses-only Go models (Muse Spark) carry
+ * `@ai-sdk/openai` and share the /v1 base, while the provider record itself —
+ * what discovery and refresh key on — still may not name that package.
+ */
+export function openCodeGoPinnedModelApiUrl(npm: string): string | null {
+  if (npm === '@ai-sdk/openai') return OPENCODE_GO_COMPLETIONS_BASE_URL;
+  return openCodeGoPinnedApiUrl(npm);
 }
 
 /** Whether a configured record occupies a built-in template's add slot. */

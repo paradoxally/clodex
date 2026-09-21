@@ -16,7 +16,7 @@ The provider uses one credential with three upstream wire protocols:
 
 - Anthropic Messages models are passed through to `https://opencode.ai/zen/go/v1/messages`.
 - OpenAI Chat Completions models are translated through the OpenAI-compatible SDK at `https://opencode.ai/zen/go/v1/chat/completions`.
-- GPT-5.6 Luna is translated through the OpenAI SDK at `https://opencode.ai/zen/go/v1/responses`. Go answers HTTP 500 for Luna on `/v1/chat/completions`.
+- OpenAI Responses models are translated through the OpenAI SDK at `https://opencode.ai/zen/go/v1/responses`. Go serves some models on this endpoint only — GPT-5.6 Luna answers there and returns 500 on `/v1/chat/completions`, and the Muse Spark contributor models answer there and return 500 on the other two.
 
 The selective proxy diverts only explicit `clodex:opencode-go:...` model ids or saved aliases. Ordinary Claude model traffic remains on Claude Code's native Anthropic connection.
 
@@ -24,7 +24,7 @@ Every endpoint requires an `x-opencode-session` header and answers `MissingSessi
 
 ## Supported transport scope
 
-The upstream OpenCode Go catalog also contains Responses-API models. Clodex includes one only after its wire behaviour is verified against the live endpoint: today that is GPT-5.6 Luna. The rest (currently Grok and mainline GPT; other unmapped ids are reported by the updater until their transport is verified) stay out of this provider.
+A model reaches the catalog only once its transport has been verified against the live endpoint; any id the updater cannot map is reported and left out. Grok and mainline GPT are still absent on that basis. Responses-API models are no longer excluded as a class — a catalog entry says so by carrying the `@ai-sdk/openai` package, which is what routes it to `/v1/responses`. The provider record itself still names `@ai-sdk/openai-compatible`, and model discovery and refresh continue to refuse any other package for it.
 
 Live `/models` results are treated as availability data. Clodex layers its committed catalog over those results to supply the correct protocol, endpoint, context window, modalities, pricing, and compatibility behavior per model. Models absent from the committed allowlist are hidden even when the live endpoint advertises them.
 

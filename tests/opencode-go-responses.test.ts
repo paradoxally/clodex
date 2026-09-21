@@ -23,6 +23,9 @@ import { streamAnthropicResponse, translateRequest } from '../src/sdk-adapter.js
 
 const SESSION_ID = '7d0f4a52-1c2b-4e8a-9b6f-3c5d2e1f0a9b';
 const LUNA = 'gpt-5.6-luna';
+// Upstream's Muse Spark contributors joined Luna on the Responses path. Naming the
+// set keeps the fleet check below from going vacuous as it grows.
+const GO_RESPONSES_MODELS = [LUNA, 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor'];
 const GO_CIPHERTEXT = 'go-encrypted-reasoning';
 
 function lunaCatalogEntry() {
@@ -196,7 +199,8 @@ describe('OpenCode Go gpt-5.6-luna catalog entry', () => {
   });
 
   it('keeps every other OpenAI-format Go model on Chat Completions', () => {
-    const others = buildOpenCodeGoModels().filter(model => model.modelFormat === 'openai' && model.id !== LUNA);
+    const others = buildOpenCodeGoModels()
+      .filter(model => model.modelFormat === 'openai' && !GO_RESPONSES_MODELS.includes(model.id));
     expect(others.length).toBeGreaterThan(0);
     for (const model of others) {
       expect(model.npm, model.id).toBe('@ai-sdk/openai-compatible');
@@ -406,20 +410,26 @@ describe('the OpenCode Go key probe', () => {
 });
 
 describe('OpenAI routes for gpt-5.6-luna stay where they were', () => {
-  it('sends an OpenAI API-key Luna request to api.openai.com for an unset, OpenAI or custom stored URL', async () => {
-    for (const baseURL of [undefined, 'https://api.openai.com/v1', 'https://gateway.example/v1']) {
-      const captured = stubNetwork();
-      const model = await createLanguageModel({ ...openAiLunaRoute(), baseURL });
-      const written: string[] = [];
-      await streamAnthropicResponse(model, {
-        messages: [{ role: 'user', content: 'hi' }],
-        providerOptions: effortProviderOptions('@ai-sdk/openai', 'xhigh', LUNA, { providerId: 'openai' }),
-      }, LUNA, chunk => written.push(chunk), () => {});
-      expect(captured[0]?.url, String(baseURL)).toBe('https://api.openai.com/v1/responses');
-      expect(captured[0]?.headers.get('authorization')).toBe('Bearer sk-openai');
-      expect(captured[0]?.body.reasoning).toMatchObject({ effort: 'xhigh' });
-      vi.unstubAllGlobals();
-    }
+  // An API-key route honours the URL it was given: a Luna route with no stored URL
+  // reaches api.openai.com, and one pointed at a third-party host reaches THAT host
+  // rather than silently sending its key to OpenAI. What the Go branch must never do
+  // is claim either of them — the OpenCode key and endpoint stay out of both.
+  it.each([
+    [undefined, 'https://api.openai.com/v1/responses'],
+    ['https://api.openai.com/v1', 'https://api.openai.com/v1/responses'],
+    ['https://gateway.example/v1', 'https://gateway.example/v1/responses'],
+  ])('sends an OpenAI API-key Luna request for stored URL %s to %s', async (baseURL, expected) => {
+    const captured = stubNetwork();
+    const model = await createLanguageModel({ ...openAiLunaRoute(), baseURL });
+    const written: string[] = [];
+    await streamAnthropicResponse(model, {
+      messages: [{ role: 'user', content: 'hi' }],
+      providerOptions: effortProviderOptions('@ai-sdk/openai', 'xhigh', LUNA, { providerId: 'openai' }),
+    }, LUNA, chunk => written.push(chunk), () => {});
+    expect(captured[0]?.url, String(baseURL)).toBe(expected);
+    expect(captured[0]?.url, String(baseURL)).not.toContain('opencode.ai');
+    expect(captured[0]?.headers.get('authorization')).toBe('Bearer sk-openai');
+    expect(captured[0]?.body.reasoning).toMatchObject({ effort: 'xhigh' });
   });
 
   it('keeps the OpenAI family effort rules when no curated ladder is present', () => {

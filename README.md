@@ -278,6 +278,16 @@ Two things worth knowing about the numbers:
   number first only costs usable context. A provider that declares a share of its own
   is still honoured; clodex just never invents one. Use `--context` if you want a
   smaller window than the provider offers.
+- **A window nobody published is not a ceiling.** Some servers list their models
+  without saying how much context each one takes. Clodex reports the 200,000 Claude
+  Code assumes anyway, but that number is a guess, not a measurement — so
+  `clodex models --context <model>=1m --save` raises it instead of being clamped back
+  down to the guess. Clamping still applies in full wherever a window *is* published,
+  by the provider or by clodex's own catalog. If the model is already baked into a
+  patched binary, re-run `clodex patch` so it picks the new window up. Set this model up
+  before this version? Run `clodex providers refresh-models <provider>` once — an older
+  clodex stored the guess as if the server had published it, and until you refresh it is
+  indistinguishable from a real limit and still clamps.
 - **The account ceiling moves.** It is server-side and per-account, and it has
   changed by more than 2x within a single day in the past. `max` reads whatever the
   catalog reports now and clamps to it, so a stale ceiling shrinks the stop rather
@@ -294,7 +304,7 @@ Two things worth knowing about the numbers:
 | `remove <id>` | Remove a provider by id |
 | `refresh-models [id]` | Update cached model lists |
 
-Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), and `opencode-go` (OpenCode Go API key). OpenCode Go exposes its Anthropic Messages and Chat Completions models plus GPT-5.6 Luna on its Responses endpoint; other Responses-only entries are excluded until verified. See [OpenCode Go provider](docs/opencode-go.md).
+Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), and `opencode-go` (OpenCode Go API key). OpenCode Go exposes its Anthropic Messages, Chat Completions, and Responses models; entries whose transport has not been verified against the live endpoint are left out. See [OpenCode Go provider](docs/opencode-go.md).
 
 A **custom OpenAI-compatible server** is any OpenAI-style API, given by its base URL (the part before `/chat/completions`), such as `https://openrouter.ai/api/v1`. `providers add` asks for a name, the base URL and an API key (leave it empty for a local server without auth), lists the server's models to check the connection, and saves the provider as `custom-<name>`. Its models then appear in `clodex models`; once saved as favorites they are addressed as `clodex:custom-<name>:<model>` and can be given a short alias with `clodex models --alias`. The base URL is checked before anything is saved: plain `http://` is accepted only after you confirm it, and only for loopback or private-network addresses, and an `https://` URL whose host is, or resolves to, a loopback (`127.0.0.0/8`, `::1`), private, link-local, unique-local, carrier-grade-NAT or well-known cloud-metadata address is refused. A model's id and name are stored with surrounding whitespace trimmed, and a model whose trimmed id or name still contains a control character is skipped, whether the list is fetched by `providers add` or by `providers refresh-models`, and error text from the server is shown with control characters replaced by spaces. Only the OpenAI-compatible kind is offered in the menu.
 

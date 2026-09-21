@@ -836,22 +836,26 @@ describe('refreshProviderModels', () => {
     expect(result.reason).toMatch(/does not support a custom API base URL/i);
   });
 
-  it('fails closed when an OpenCode record names an SDK package the provider does not serve', async () => {
-    const registry = openCodeRegistry({ npm: '@ai-sdk/xai' });
+  // `@ai-sdk/openai` is refused HERE while a catalog model may still carry it:
+  // the model pin is the wider of the two, the provider record's is not.
+  it.each(['@ai-sdk/xai', '@ai-sdk/openai'])(
+    'fails closed when an OpenCode record names the SDK package %s the provider does not serve',
+    async npm => {
+      const registry = openCodeRegistry({ npm });
 
-    const result = await refreshProviderModels('opencode-go', 'oc-real-key', registry);
+      const result = await refreshProviderModels('opencode-go', 'oc-real-key', registry);
 
-    expect(fetchAnthropicModels).not.toHaveBeenCalled();
-    expect(fetchTemplateModels).not.toHaveBeenCalled();
-    expect(saveRegistry).not.toHaveBeenCalled();
-    expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/does not support the @ai-sdk\/xai SDK package/i);
-  });
+      expect(fetchAnthropicModels).not.toHaveBeenCalled();
+      expect(fetchTemplateModels).not.toHaveBeenCalled();
+      expect(saveRegistry).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(new RegExp(`does not support the ${npm} SDK package`, 'i'));
+    },
+  );
 
   it.each([
     ['@ai-sdk/openai-compatible', OPENCODE_GO_ANTHROPIC_BASE_URL],
     ['@ai-sdk/anthropic', OPENCODE_GO_COMPLETIONS_BASE_URL],
-    ['@ai-sdk/openai', OPENCODE_GO_ANTHROPIC_BASE_URL],
   ])('refuses mismatched OpenCode package/destination pair %s before network or writes', async (npm, url) => {
     const registry = openCodeRegistry({ npm, url });
 
