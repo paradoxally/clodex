@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   anthropicBodyForUpstream,
   isAnthropicFirstPartyUpstream,
+  stripAdvisorTool,
   stripToolAdditions,
 } from '../src/third-party-anthropic-body.js';
 import { startProxyCatalog, type ProxyRoute } from '../src/proxy.js';
@@ -68,6 +69,44 @@ function toolSearchResultBody(): Record<string, any> {
           content: [{ type: 'tool_reference', tool_name: DOCS_BATCH }],
         }],
       },
+    ],
+  };
+}
+
+/** The server-side tool Claude Code 2.1.278 appends once an advisor model resolves. */
+const advisorTool = {
+  type: 'advisor_20260301',
+  name: 'advisor',
+  model: 'claude-opus-5',
+  defer_loading: true,
+};
+const advisorCall = {
+  type: 'server_tool_use',
+  id: 'srvtoolu_01advisor',
+  name: 'advisor',
+  input: { prompt: 'review this' },
+};
+const advisorResult = {
+  type: 'advisor_tool_result',
+  tool_use_id: 'srvtoolu_01advisor',
+  content: { type: 'advisor_result', stop_reason: 'end_turn', text: 'looks fine' },
+};
+
+/** A turn Claude Code sent to Anthropic before the session switched to a routed model. */
+function advisorBody(): Record<string, any> {
+  return {
+    model: 'deepseek-v4.1-flash',
+    max_tokens: 64,
+    stream: false,
+    tools: [
+      { name: 'Bash', input_schema: schema },
+      { name: 'Read', input_schema: schema, cache_control: hourCache },
+      advisorTool,
+    ],
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'review my patch' }] },
+      { role: 'assistant', content: [advisorCall, advisorResult, { type: 'text', text: 'ship it' }] },
+      { role: 'user', content: [{ type: 'text', text: 'thanks' }] },
     ],
   };
 }
@@ -151,12 +190,137 @@ describe('stripToolAdditions', () => {
   });
 });
 
+describe('stripAdvisorTool', () => {
+  it('removes the advisor tool declaration and leaves every real tool alone', () => {
+    const out = stripAdvisorTool(advisorBody());
+
+    expect(out.tools).toEqual([
+      { name: 'Bash', input_schema: schema },
+      { name: 'Read', input_schema: schema, cache_control: hourCache },
+    ]);
+  });
+
+  it('removes the advisor call and result the history carries once the advisor has run', () => {
+    const out = stripAdvisorTool(advisorBody());
+
+    expect(out.messages[1]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ship it' }],
+    });
+    expect(wireText(out)).not.toContain('advisor');
+  });
+
+  it("leaves another provider's server tool and its result in place", () => {
+    const body = advisorBody();
+    const webSearch = { type: 'server_tool_use', id: 'srvtoolu_02', name: 'web_search', input: { query: 'x' } };
+    const webResult = { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_02', content: [] };
+    body.tools.splice(2, 0, { type: 'web_search_20250305', name: 'web_search' });
+    body.messages[1].content = [webSearch, webResult, advisorCall, advisorResult, { type: 'text', text: 'ship it' }];
+
+    const out = stripAdvisorTool(body);
+
+    expect(out.tools).toContainEqual({ type: 'web_search_20250305', name: 'web_search' });
+    expect(out.messages[1].content).toEqual([webSearch, webResult, { type: 'text', text: 'ship it' }]);
+  });
+
+  it('matches a later dated version of the tool, not just the one shipped in 2.1.278', () => {
+    const body = advisorBody();
+    body.tools = [{ name: 'Bash', input_schema: schema }, { ...advisorTool, type: 'advisor_20270101' }];
+
+    expect(stripAdvisorTool(body).tools).toEqual([{ name: 'Bash', input_schema: schema }]);
+  });
+
+  it('matches a later dated version of the result block too, so a strip can never go half done', () => {
+    const body = advisorBody();
+    body.messages[1].content = [
+      advisorCall,
+      { ...advisorResult, type: 'advisor_tool_result_20270101' },
+      { type: 'text', text: 'ship it' },
+    ];
+
+    expect(stripAdvisorTool(body).messages[1].content).toEqual([{ type: 'text', text: 'ship it' }]);
+  });
+
+  it('never invents a turn for a role Claude Code puts no advisor block on', () => {
+    const body = advisorBody();
+    body.messages = [
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { role: 'user', content: [advisorCall, advisorResult] },
+      { role: 'user', content: [advisorResult, { type: 'text', text: 'thanks' }] },
+    ];
+
+    expect(stripAdvisorTool(body).messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { role: 'user', content: [{ type: 'text', text: 'thanks' }] },
+    ]);
+  });
+
+  it('substitutes a placeholder for a turn the advisor blocks were carrying on their own', () => {
+    const body = advisorBody();
+    body.messages[1].content = [
+      { type: 'thinking', thinking: 'let me ask', signature: 'sig' },
+      advisorCall,
+      advisorResult,
+    ];
+
+    expect(stripAdvisorTool(body).messages[1].content).toEqual([
+      { type: 'thinking', thinking: 'let me ask', signature: 'sig' },
+      { type: 'text', text: '[Advisor response]' },
+    ]);
+  });
+
+  it('never leaves an assistant turn with nothing in it at all', () => {
+    const body = advisorBody();
+    body.messages[1].content = [advisorCall, advisorResult];
+
+    expect(stripAdvisorTool(body).messages[1]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: '[Advisor response]' }],
+    });
+  });
+
+  it('keeps a cache breakpoint the removed blocks were carrying', () => {
+    const body = advisorBody();
+    body.tools = [{ name: 'Bash', input_schema: schema }, { ...advisorTool, cache_control: hourCache }];
+    body.messages[1].content = [{ type: 'text', text: 'ship it' }, { ...advisorResult, cache_control: hourCache }];
+
+    const out = stripAdvisorTool(body);
+
+    expect(out.tools).toEqual([{ name: 'Bash', input_schema: schema, cache_control: hourCache }]);
+    expect(out.messages[1].content).toEqual([{ type: 'text', text: 'ship it', cache_control: hourCache }]);
+  });
+
+  it('keeps a cache breakpoint that had nothing left in front of it', () => {
+    const body = advisorBody();
+    body.messages[1].content = [{ ...advisorResult, cache_control: hourCache }];
+
+    expect(stripAdvisorTool(body).messages[1].content).toEqual([
+      { type: 'text', text: '[Advisor response]', cache_control: hourCache },
+    ]);
+  });
+
+  it('returns the very same body when the advisor never appeared', () => {
+    const body = lateToolAdditionBody();
+    expect(stripAdvisorTool(body)).toBe(body);
+  });
+
+  it('leaves the request it was given untouched', () => {
+    const body = advisorBody();
+    const before = structuredClone(body);
+
+    stripAdvisorTool(body);
+
+    expect(body).toEqual(before);
+  });
+});
+
 describe('anthropicBodyForUpstream', () => {
   it('leaves requests to Anthropic itself byte-for-byte alone', () => {
-    const body = lateToolAdditionBody();
-    expect(isAnthropicFirstPartyUpstream({ baseUrl: 'https://api.anthropic.com' })).toBe(true);
-    expect(anthropicBodyForUpstream(body, { providerId: 'anthropic', baseUrl: 'https://api.anthropic.com' })).toBe(body);
-    expect(anthropicBodyForUpstream(body, { providerId: 'claude-code', baseUrl: 'https://gateway.example' })).toBe(body);
+    for (const body of [lateToolAdditionBody(), advisorBody()]) {
+      expect(isAnthropicFirstPartyUpstream({ baseUrl: 'https://api.anthropic.com' })).toBe(true);
+      expect(anthropicBodyForUpstream(body, { providerId: 'anthropic', baseUrl: 'https://api.anthropic.com' })).toBe(body);
+      expect(anthropicBodyForUpstream(body, { providerId: 'claude-code', baseUrl: 'https://gateway.example' })).toBe(body);
+    }
   });
 
   it('cleans requests bound for any other Anthropic-format upstream', () => {
@@ -167,6 +331,12 @@ describe('anthropicBodyForUpstream', () => {
       .not.toContain('tool_addition');
     expect(wireText(anthropicBodyForUpstream(body, { providerId: 'custom', baseUrl: 'not a url' })))
       .not.toContain('tool_addition');
+  });
+
+  it('strips the advisor tool and its history blocks on the way to any other upstream', () => {
+    const go = { providerId: 'opencode-go', baseUrl: 'https://opencode.ai/zen/go' };
+
+    expect(wireText(anthropicBodyForUpstream(advisorBody(), go))).not.toContain('advisor');
   });
 });
 
@@ -265,6 +435,19 @@ describe('proxy-mode passthrough', () => {
     }
   });
 
+  it('sends OpenCode Go a request with no trace of the advisor tool', async () => {
+    const sent = captureUpstreamFetch();
+    const handle = await startProxyCatalog([goRoute], goRoute.aliasId, false);
+    try {
+      expect(await postToProxy(handle.port, handle.token, { ...advisorBody(), model: goRoute.aliasId })).toBe(200);
+
+      expect(wireText(sent[0]!.body)).not.toContain('advisor');
+      expect(sent[0]!.body.messages[1].content).toEqual([{ type: 'text', text: 'ship it' }]);
+    } finally {
+      handle.close();
+    }
+  });
+
   it('forwards the same blocks untouched to api.anthropic.com', async () => {
     const sent = captureUpstreamFetch();
     const route: ProxyRoute = {
@@ -276,7 +459,7 @@ describe('proxy-mode passthrough', () => {
     };
     const handle = await startProxyCatalog([route], route.aliasId, false);
     try {
-      const body = { ...lateToolAdditionBody(), model: route.aliasId };
+      const body = { ...lateToolAdditionBody(), ...advisorBody(), model: route.aliasId };
       expect(await postToProxy(handle.port, handle.token, body)).toBe(200);
 
       expect(sent).toHaveLength(1);
@@ -347,10 +530,19 @@ describe('API server /anthropic/v1/messages passthrough', () => {
     expect(sent[1]!.body).toEqual({ ...toolSearchResultBody(), model: 'deepseek-v4.1-flash' });
   });
 
+  it('sends OpenCode Go a request with no trace of the advisor tool', async () => {
+    const sent = captureUpstreamFetch();
+    const handle = await startGateway('opencode-go', 'https://opencode.ai/zen/go');
+
+    expect(await post(handle, '/anthropic/v1/messages', advisorBody())).toBe(200);
+
+    expect(wireText(sent[0]!.body)).not.toContain('advisor');
+  });
+
   it('forwards the same blocks untouched to api.anthropic.com', async () => {
     const sent = captureUpstreamFetch();
     const handle = await startGateway('anthropic', 'https://api.anthropic.com');
-    const body = lateToolAdditionBody();
+    const body = { ...lateToolAdditionBody(), ...advisorBody() };
 
     expect(await post(handle, '/anthropic/v1/messages', body)).toBe(200);
 
@@ -369,5 +561,12 @@ describe('translated (SDK) routes', () => {
       { role: 'system', content: 'Docs server connected.' },
     ]);
     expect(wireText(params.messages)).not.toContain('tool_addition');
+  });
+
+  it('never carried the advisor tool or its result blocks to a translated provider', () => {
+    const params = translateRequest(advisorBody() as any, '@ai-sdk/openai');
+
+    expect(Object.keys(params.tools ?? {})).toEqual(['Bash', 'Read']);
+    expect(wireText(params.messages)).not.toContain('advisor');
   });
 });

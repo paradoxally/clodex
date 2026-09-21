@@ -574,6 +574,43 @@ banner delay is two patch sites rather than one.
 `if(l>=2000)` in both directions. That `2000` is an inline bare literal, not a named constant —
 mirroring it means spelling the number, not `2e3`.
 
+## The advisor tool goes to every upstream (verified 2.1.278, darwin-arm64)
+
+2.1.278 added an advisor: a second, stronger model the assistant can consult mid-turn, executed
+server-side by Anthropic. Three gates decide whether it is on, all in `Kdt`/`sb`:
+`CLAUDE_CODE_DISABLE_ADVISOR_TOOL` unset, `Oe()==="firstParty"`, and either the
+`tengu_sage_compass2` flag or `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL`. Nothing in the chain
+asks where the request is going.
+
+It also pushes the `advisor-tool-2026-03-01` beta (`ZCn=Pe("advisor_tool",…)`, under
+`if(Kdt()&&(sb()||h.advisorModel!==void 0))`), so the header travels with the block. OpenCode Go
+answers 200 with that beta present and no advisor block, so the header is not part of the failure.
+
+**The declaration.** Once an advisor model resolves, the request builder appends
+`{type:"advisor_20260301",name:"advisor",model:<advisor id>,defer_loading?:true}` to the tools array
+— `Dp=[...h.extraToolSchemas??[]];if(Mo)Dp.push(...)`, then `kl=[...or,...Dp]`. It is always last,
+and carries neither `input_schema` nor `cache_control`: `EOt`, the rewrite the array passes through
+on the way to the request, returns its input untouched off the Foundry path. In proxy mode Claude
+Code keeps its Anthropic auth, so `firstParty` holds and the block goes out on requests clodex
+routes elsewhere.
+
+**What the history then carries.** An advisor turn leaves two block kinds in the assistant message:
+`server_tool_use` with `name:"advisor"`, and `advisor_tool_result`, whose `content` is a single
+object (`{type:"advisor_result"|"advisor_redacted_result"|"advisor_tool_result_error",…}`), not an
+array. Those two are the only advisor types in the content-block whitelist; the rest are nested
+inside that object.
+
+**Its own recoveries never fire for a third-party upstream.** `THe` (bad result content), `Sue`
+(tool unavailable) and `x5` (advisor incompatible with the request model) each require
+`status === 400` *and* an Anthropic-worded message. An upstream that rejects the block with anything
+else — OpenCode Go answers the declaration and the result block with `422 {"model":"<id>"}` and the
+`server_tool_use` block with `400 {"model":"<id>"}` — matches none of them, so the turn just dies.
+
+**The recovery shape, when it does fire.** `cD` drops `advisor_tool_result` and `server_tool_use`
+blocks named `advisor` from assistant messages, and when that leaves a message empty or holding only
+thinking and blank text it appends `{type:"text",text:"[Advisor response]",citations:[]}`.
+`src/third-party-anthropic-body.ts` mirrors that rule.
+
 ## Things that looked like clodex bugs and were not (not version-specific)
 
 - **"Concurrent subagents died at turn 2" was not unknown-model classification.** The agents' first
