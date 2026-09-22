@@ -510,6 +510,19 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
       .toBeUndefined();
   });
 
+  // Measured on api.openai.com on 2026-09-22: gpt-6-luna accepts none, low, medium,
+  // high, xhigh and max.
+  it('keeps the none effort that gpt-6-luna accepts', () => {
+    expect(effortProviderOptions('@ai-sdk/openai', 'none', 'gpt-6-luna', { reasoning: true }))
+      .toEqual({ openai: { reasoningEffort: 'none', forceReasoning: true } });
+  });
+
+  // gpt-6-sol was never measured, so the luna opt-in must not widen to the family.
+  it.each(['gpt-6-sol', 'gpt-6-lunar'])('still drops a none effort for %s', modelId => {
+    expect(effortProviderOptions('@ai-sdk/openai', 'none', modelId, { reasoning: true }))
+      .toBeUndefined();
+  });
+
   it('keeps the none effort that gpt-daybreak-blue-latest accepts', () => {
     expect(effortProviderOptions('@ai-sdk/openai', 'none', 'gpt-daybreak-blue-latest', { reasoning: true }))
       .toEqual({ openai: { reasoningEffort: 'none', forceReasoning: true } });

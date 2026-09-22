@@ -632,13 +632,16 @@ function supportsExtendedCodexEffort(modelId: string): boolean {
  *   400 Unsupported value: 'none' is not supported with the 'gpt-6-astra' model.
  *   Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.
  * So it stays an explicit per-family opt-in instead of riding along with the
- * extended range above. Both entries below were confirmed to accept it on
- * 2026-09-04; guessing wrong here is a hard 400, not a downgrade.
+ * extended range above. gpt-5.6 and gpt-daybreak-blue were confirmed to accept it
+ * on 2026-09-04, gpt-6-luna on api.openai.com on 2026-09-22; guessing wrong here is
+ * a hard 400, not a downgrade.
  */
 function supportsNoneEffort(modelId: string): boolean {
   // Deliberately narrower than the extended-range rule above: only the colours
-  // actually confirmed to accept it, not every gpt-daybreak-* alias.
-  return /^gpt-5\.6(?:-|$)/i.test(modelId) || /^gpt-daybreak-blue(?:-|$)/i.test(modelId);
+  // actually confirmed to accept it, not every gpt-daybreak-* alias or gpt-6 model.
+  return /^gpt-5\.6(?:-|$)/i.test(modelId)
+    || /^gpt-daybreak-blue(?:-|$)/i.test(modelId)
+    || /^gpt-6-luna(?:-|$)/i.test(modelId);
 }
 
 // gpt-5.3-codex-spark rejects `reasoning.summary` outright:
