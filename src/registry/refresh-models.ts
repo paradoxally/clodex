@@ -155,6 +155,7 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
 }
 
 const GPT6_ID = /^gpt-6(?:[.-]|$)/i;
+const GPT6_CODEX_WINDOW_SEED = 'gpt-6-astra';
 
 /**
  * Build a CachedModel for a discovered OpenAI OAuth model. The live backend is
@@ -192,14 +193,9 @@ function buildDynamicOAuthModel(
   const prefix = id.split('-')[0] ?? id;
   // The gpt-6 id rule and the cache's OpenAI cap describe the API-key route (922,000
   // input); the Codex backend serves gpt-6 a smaller window. A gpt-6 id the catalog
-  // lists without one takes the smallest seeded sibling's catalog window (and on a
-  // tie the smaller ceiling) instead, so the answer never depends on seed order.
+  // lists without one takes gpt-6-astra's, the one gpt-6 window the catalog reported.
   const familySeed = entry.context_window === undefined && GPT6_ID.test(id)
-    ? [...seedById.values()]
-      .filter(model => GPT6_ID.test(model.id) && model.contextWindow !== undefined)
-      .sort((a, b) => (a.contextWindow as number) - (b.contextWindow as number)
-        || (a.maxContextWindow ?? a.contextWindow as number)
-          - (b.maxContextWindow ?? b.contextWindow as number))[0]
+    ? seedById.get(GPT6_CODEX_WINDOW_SEED)
     : undefined;
   return {
     id,
