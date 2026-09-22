@@ -630,6 +630,14 @@ in `src/tool-schema-sanitize.ts` did not recognise it, and the raw Anthropic-for
 did. Both are closed: `anthropicBodyForUpstream` now sanitizes tool schemas for any non-Anthropic
 upstream, and the scanner drops a backslash-digit escape inside a class.
 
+**The dropped constraint is still enforced on the client.** The 2.1.278 bundle's own Zod schema
+for the tool reads `file_paths: k(o().min(1).max(G5).regex(/^[^\\0]*$/))`, and a built-in's input
+goes through `inputSchema.safeParse` before it executes, so a wire schema without the regex
+changes nothing about what the tool accepts — the same standing `field` had in #194. Node refuses
+a path holding a NUL byte anyway (`ERR_INVALID_ARG_VALUE`, checked on 26.9.0). The loosening is
+real only for an MCP or plugin tool, where it is the trade the sanitizer module already makes on
+every OpenAI-format route.
+
 **Not the cause, each ruled out on the live endpoint:** the `role: "system"` message in `messages`
 (a SessionStart hook's output; Go accepts it), `thinking.display: "updates"`, `context_management`,
 `diagnostics`, `cache_control.scope: "global"`, the `DeferredToolPlaceholder` tool, and the
