@@ -77,6 +77,14 @@ describe('buildContextWindowIndex', () => {
     expect(index.get('claude-sonnet-4-6')).toBe(1_000_000);
   });
 
+  it('keeps the opencode entry even when another provider lists a larger window', () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'glm-5.1': { limit: { context: 204_800 } } } },
+      crof: { models: { 'glm-5.1': { limit: { context: 1_000_000 } } } },
+    });
+    expect(index.get('glm-5.1')).toBe(204_800);
+  });
+
   it('uses max across providers when opencode keys are absent', () => {
     const index = buildContextWindowIndex({
       frogbot: { models: { 'gemini-2.5-flash': { limit: { context: 200_000 } } } },
@@ -153,6 +161,33 @@ describe('buildContextWindowIndex', () => {
       jiekou: { models: { 'gpt-5-pro': { limit: { context: 400_000 } } } },
     });
     expect(index.get('gpt-5-pro')).toBe(272_000);
+  });
+
+  // Shape taken from the real cache: OpenCode's own entry for gpt-5.3-codex-spark
+  // states no cap, while OpenAI caps input at 100,000 on the same 128,000 total.
+  it("applies OpenAI's own cap to a priority entry that states none", () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'gpt-5.3-codex-spark': { limit: { context: 128_000, input: 128_000 } } } },
+      openai: { models: { 'gpt-5.3-codex-spark': { limit: { context: 128_000, input: 100_000 } } } },
+    });
+    expect(index.get('gpt-5.3-codex-spark')).toBe(100_000);
+  });
+
+  it("does not let OpenAI's cap at another total override a priority entry", () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'zen-model': { limit: { context: 1_000_000 } } } },
+      openai: { models: { 'zen-model': { limit: { context: 400_000, input: 272_000 } } } },
+    });
+    expect(index.get('zen-model')).toBe(1_000_000);
+  });
+
+  // Shape taken from the real cache: requesty alone lists gpt-5.5@eu, passing
+  // OpenAI's real 922,000 cap through. With no other provider to disagree, it holds.
+  it("keeps a lone provider's input cap", () => {
+    const index = buildContextWindowIndex({
+      requesty: { models: { 'gpt-5.5@eu': { limit: { context: 1_050_000, input: 922_000 } } } },
+    });
+    expect(index.get('gpt-5.5@eu')).toBe(922_000);
   });
 
   it("does not let OpenAI's cap at a smaller total shrink a larger one", () => {

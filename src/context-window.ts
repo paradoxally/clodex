@@ -87,6 +87,7 @@ export function loadOpencodeCache(): OpencodeCacheFile | null {
 /** Build a model-id → context-window map from OpenCode cache data. Exported for tests. */
 export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, number> {
   const index = new Map<string, number>();
+  const priority = new Map<string, { total: number; window: number }>();
   const allLimits = new Map<string, Array<{ total: number; input?: number; authority: boolean }>>();
 
   for (const [providerKey, providerData] of Object.entries(cache)) {
@@ -109,17 +110,30 @@ export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, n
       // Claude Code fills the window it is told with input, so the input cap is
       // the usable window.
       if (CACHE_PROVIDER_PRIORITY.has(providerKey)) {
-        index.set(modelId, input ?? ctx);
+        priority.set(modelId, { total: ctx, window: input ?? ctx });
       }
     }
   }
 
-  // The largest total any provider offers, capped by the model maker's own stated
-  // cap at that total, else only when most providers offering it state one. Many
-  // entries derive `input` as total minus output, so one reseller alone is not
-  // evidence of a real cap, and a smaller reseller's cap never shrinks the total.
+  // The model maker's own cap at the same total still binds a priority entry that
+  // states none: OpenCode lists gpt-5.3-codex-spark at a flat 128,000 while OpenAI
+  // caps its input at 100,000.
+  //
+  // Otherwise: the largest total any provider offers, capped by the model maker's
+  // own stated cap at that total, else only when most providers offering it state
+  // one. Many entries derive `input` as total minus output, so a minority of
+  // resellers cannot cap a total the others leave whole, and a smaller reseller's
+  // cap never shrinks it. A lone provider's cap is the only data there is, and is
+  // kept.
   for (const [modelId, limits] of allLimits) {
-    if (index.has(modelId)) continue;
+    const chosen = priority.get(modelId);
+    if (chosen) {
+      const makerCap = limits.find(
+        limit => limit.authority && limit.total === chosen.total && limit.input !== undefined,
+      )?.input;
+      index.set(modelId, makerCap === undefined ? chosen.window : Math.min(chosen.window, makerCap));
+      continue;
+    }
     const largest = Math.max(...limits.map(limit => limit.total));
     const atLargest = limits.filter(limit => limit.total === largest);
     const authorityCap = atLargest.find(limit => limit.authority && limit.input !== undefined)?.input;
