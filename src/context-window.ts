@@ -1,7 +1,8 @@
 // Context window resolution for proxy /v1/models and Claude Code child env.
 //
 // Priority:
-//   1. OpenCode models.json cache (limit.context) — `opencode` / `opencode-go` file keys first
+//   1. OpenCode models.json cache (limit.input, else limit.context) — `opencode` / `opencode-go`
+//      file keys first
 //   2. ID-pattern heuristics for models not in cache
 //   3. 200K default (Claude Code's own fallback for unknown models)
 import { readFileSync } from 'node:fs';
@@ -12,6 +13,10 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
 /** OpenCode cache file provider keys (metadata enrichment only, not clodex registry ids). */
 const CACHE_PROVIDER_PRIORITY = new Set(['opencode', 'opencode-go']);
 
+/** Cache keys whose own input cap outranks resellers that state none. OpenAI enforces
+ *  the cap it publishes: gpt-6-luna rejects input above its stated 922,000. */
+const INPUT_CAP_AUTHORITY = new Set(['openai']);
+
 export interface OpencodeCacheModel {
   id?: string;
   name?: string;
@@ -19,7 +24,7 @@ export interface OpencodeCacheModel {
   status?: string;
   provider?: { npm?: string };
   cost?: { input: number; output: number };
-  limit?: { context?: number; output?: number };
+  limit?: { context?: number; input?: number; output?: number };
   reasoning?: boolean;
   interleaved?: { field?: string };
 }
@@ -37,6 +42,10 @@ const HEURISTIC_RULES: Array<[RegExp, number]> = [
   [/claude/i, 200_000],
   [/deepseek-v4|deepseek-r1|deepseek-reasoner/i, 1_000_000],
   [/deepseek/i, 64_000],
+  // OpenAI rejects input above 922,000 on a 1,050,000 window. Claude Code compacts
+  // ~33K below the window it is told, so reporting 1.05M lets a session cross the
+  // input cap and fail with context_length_exceeded before it ever compacts.
+  [/(?:^|\/)gpt-6(?:[.-]|$)/i, 922_000],
   [/gpt-5|gpt-4\.1|o3-|o4-/i, 1_000_000],
   [/gpt-4o|gpt-4-turbo|gpt-4/i, 128_000],
   [/gpt-oss/i, 131_072],
@@ -78,7 +87,7 @@ export function loadOpencodeCache(): OpencodeCacheFile | null {
 /** Build a model-id → context-window map from OpenCode cache data. Exported for tests. */
 export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, number> {
   const index = new Map<string, number>();
-  const allLimits = new Map<string, number[]>();
+  const allLimits = new Map<string, Array<{ total: number; input?: number; authority: boolean }>>();
 
   for (const [providerKey, providerData] of Object.entries(cache)) {
     const models = providerData?.models;
@@ -86,21 +95,41 @@ export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, n
     for (const [modelId, entry] of Object.entries(models)) {
       const ctx = entry.limit?.context;
       if (typeof ctx !== 'number' || ctx <= 0) continue;
+      const rawInput = entry.limit?.input;
+      // Only an input limit below the total is a cap; several resellers restate
+      // their total as `input`, which says nothing about the split.
+      const input = typeof rawInput === 'number' && rawInput > 0 && rawInput < ctx
+        ? rawInput
+        : undefined;
 
       const limits = allLimits.get(modelId) ?? [];
-      limits.push(ctx);
+      limits.push({ total: ctx, input, authority: INPUT_CAP_AUTHORITY.has(providerKey) });
       allLimits.set(modelId, limits);
 
+      // Claude Code fills the window it is told with input, so the input cap is
+      // the usable window.
       if (CACHE_PROVIDER_PRIORITY.has(providerKey)) {
-        index.set(modelId, ctx);
+        index.set(modelId, input ?? ctx);
       }
     }
   }
 
+  // The largest total any provider offers, capped by the model maker's own stated
+  // cap at that total, else only when most providers offering it state one. Many
+  // entries derive `input` as total minus output, so one reseller alone is not
+  // evidence of a real cap, and a smaller reseller's cap never shrinks the total.
   for (const [modelId, limits] of allLimits) {
-    if (!index.has(modelId)) {
-      index.set(modelId, Math.max(...limits));
-    }
+    if (index.has(modelId)) continue;
+    const largest = Math.max(...limits.map(limit => limit.total));
+    const atLargest = limits.filter(limit => limit.total === largest);
+    const authorityCap = atLargest.find(limit => limit.authority && limit.input !== undefined)?.input;
+    const caps = atLargest
+      .map(limit => limit.input)
+      .filter((input): input is number => input !== undefined);
+    index.set(
+      modelId,
+      authorityCap ?? (caps.length * 2 > atLargest.length ? Math.max(...caps) : largest),
+    );
   }
 
   return index;
