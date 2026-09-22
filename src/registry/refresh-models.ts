@@ -154,6 +154,8 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
   return [];
 }
 
+const GPT6_ID = /^gpt-6(?:[.-]|$)/i;
+
 /**
  * Build a CachedModel for a discovered OpenAI OAuth model. The live backend is
  * authoritative for context and capability flags: when the model is also seeded,
@@ -188,14 +190,20 @@ function buildDynamicOAuthModel(
   }
   const { id } = entry;
   const prefix = id.split('-')[0] ?? id;
+  // The gpt-6 id rule and the cache's OpenAI cap describe the API-key route (922,000
+  // input); the Codex backend serves gpt-6 a smaller window. A gpt-6 id the catalog
+  // lists without one takes its seeded sibling's catalog window instead.
+  const familySeed = entry.context_window === undefined && GPT6_ID.test(id)
+    ? [...seedById.values()].find(model => GPT6_ID.test(model.id))
+    : undefined;
   return {
     id,
     name: entry.name,
     upstreamModelId: id,
     family: prefix,
     brand: deriveBrand(prefix),
-    contextWindow: entry.context_window ?? lookupKnownContextWindow(id),
-    maxContextWindow: entry.max_context_window,
+    contextWindow: entry.context_window ?? familySeed?.contextWindow ?? lookupKnownContextWindow(id),
+    maxContextWindow: entry.max_context_window ?? familySeed?.maxContextWindow,
     // Absent means no reduction. clodex reports the window the provider actually
     // gives; deciding how much of it to leave free is the client's job, and Claude
     // Code already reserves a flat 33,000 tokens below whatever it is told.

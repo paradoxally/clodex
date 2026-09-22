@@ -346,6 +346,44 @@ describe('registry/refresh-models', () => {
       expect(windows.get('gpt-brand-new')).toBe(272_000);
     });
 
+    // The 922,000 gpt-6 rule describes the API-key route. The Codex backend serves
+    // gpt-6 its own smaller window, so an unlisted one comes from the seeded sibling.
+    it("gives a gpt-6 id the catalog lists without a window its seeded sibling's window", async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { slug: 'gpt-6-luna', title: 'Luna' },
+            { slug: 'gpt-6-sol', title: 'Sol', context_window: 300_000 },
+            { slug: 'gpt-5.9-test', title: 'Five' },
+          ],
+        }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const byId = new Map((saved.providers[0]?.modelsCache?.models ?? []).map(m => [m.id, m]));
+      expect(byId.get('gpt-6-luna')?.contextWindow).toBe(272_000);
+      expect(byId.get('gpt-6-luna')?.maxContextWindow).toBe(872_000);
+      expect(byId.get('gpt-6-sol')?.contextWindow).toBe(300_000);
+      expect(byId.get('gpt-6-sol')?.maxContextWindow).toBeUndefined();
+      expect(byId.get('gpt-5.9-test')?.contextWindow).toBe(1_000_000);
+    });
+
     // Scope guard for the default above. Tier 2 is the general ChatGPT catalog — the
     // web model picker — which carries plainly non-reasoning models, so the
     // "only agentic models" premise that justifies the default does not hold there.

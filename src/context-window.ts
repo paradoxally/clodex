@@ -88,7 +88,7 @@ export function loadOpencodeCache(): OpencodeCacheFile | null {
 export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, number> {
   const index = new Map<string, number>();
   const allLimits = new Map<string, number[]>();
-  const openAiInputCaps = new Map<string, number>();
+  const openAiInputCaps = new Map<string, { total: number; cap: number }>();
 
   for (const [providerKey, providerData] of Object.entries(cache)) {
     const models = providerData?.models;
@@ -107,7 +107,7 @@ export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, n
 
       const input = entry.limit?.input;
       if (providerKey === INPUT_CAP_PROVIDER && typeof input === 'number' && input > 0 && input < ctx) {
-        openAiInputCaps.set(modelId, input);
+        openAiInputCaps.set(modelId, { total: ctx, cap: input });
       }
     }
   }
@@ -120,9 +120,11 @@ export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, n
 
   // Claude Code fills the window it is told with input, so an enforced input cap
   // is the usable window. Other providers' `input` is often just total minus
-  // output rather than a limit anyone enforces, so it is not read.
-  for (const [modelId, cap] of openAiInputCaps) {
-    index.set(modelId, Math.min(index.get(modelId) ?? cap, cap));
+  // output rather than a limit anyone enforces, so it is not read. OpenAI's cap
+  // describes its own total; a larger total listed elsewhere is left alone.
+  for (const [modelId, { total, cap }] of openAiInputCaps) {
+    const window = index.get(modelId) ?? total;
+    if (window <= total) index.set(modelId, Math.min(window, cap));
   }
 
   return index;

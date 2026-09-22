@@ -122,6 +122,14 @@ describe('buildContextWindowIndex', () => {
     expect(index.get('some-gpt')).toBe(200_000);
   });
 
+  it("leaves a window larger than OpenAI's own listed total alone", () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'zen-model': { limit: { context: 1_000_000 } } } },
+      openai: { models: { 'zen-model': { limit: { context: 128_000, input: 100_000 } } } },
+    });
+    expect(index.get('zen-model')).toBe(1_000_000);
+  });
+
   it('ignores an OpenAI input that is not below its total', () => {
     const index = buildContextWindowIndex({
       openai: {
