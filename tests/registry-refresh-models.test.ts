@@ -419,6 +419,41 @@ describe('registry/refresh-models', () => {
       expect(luna?.maxContextWindow).toBe(872_000);
     });
 
+    // A seed with no ceiling cannot be raised past its window, so on a tie it is the
+    // narrower one, not an unbounded one.
+    it('treats a tied gpt-6 seed with no ceiling as capped at its own window', async () => {
+      const oauthSeeds = await import('../src/data/openai-oauth-models.js');
+      const seeds = oauthSeeds.buildOpenAiOAuthModels();
+      const astra = seeds.find(m => m.id === 'gpt-6-astra')!;
+      const fixed = { ...astra, id: 'gpt-6-zz-fixed', maxContextWindow: undefined };
+      const spy = vi.spyOn(oauthSeeds, 'buildOpenAiOAuthModels').mockReturnValue([...seeds, fixed]);
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ models: [{ slug: 'gpt-6-luna', title: 'Luna' }] }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+      spy.mockRestore();
+
+      const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const luna = (saved.providers[0]?.modelsCache?.models ?? []).find(m => m.id === 'gpt-6-luna');
+      expect(luna?.contextWindow).toBe(272_000);
+      expect(luna?.maxContextWindow).toBeUndefined();
+    });
+
     // Scope guard for the default above. Tier 2 is the general ChatGPT catalog — the
     // web model picker — which carries plainly non-reasoning models, so the
     // "only agentic models" premise that justifies the default does not hold there.

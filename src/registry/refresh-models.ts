@@ -198,7 +198,8 @@ function buildDynamicOAuthModel(
     ? [...seedById.values()]
       .filter(model => GPT6_ID.test(model.id) && model.contextWindow !== undefined)
       .sort((a, b) => (a.contextWindow as number) - (b.contextWindow as number)
-        || (a.maxContextWindow ?? Infinity) - (b.maxContextWindow ?? Infinity))[0]
+        || (a.maxContextWindow ?? a.contextWindow as number)
+          - (b.maxContextWindow ?? b.contextWindow as number))[0]
     : undefined;
   return {
     id,
