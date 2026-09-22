@@ -384,11 +384,14 @@ describe('registry/refresh-models', () => {
       expect(byId.get('gpt-5.9-test')?.contextWindow).toBe(1_000_000);
     });
 
-    it('takes the smallest gpt-6 seed window whatever the seed order', async () => {
+    it('takes the smallest gpt-6 seed window and ceiling whatever the seed order', async () => {
       const oauthSeeds = await import('../src/data/openai-oauth-models.js');
       const seeds = oauthSeeds.buildOpenAiOAuthModels();
-      const bigger = { ...seeds.find(m => m.id === 'gpt-6-astra')!, id: 'gpt-6-zz-big', contextWindow: 500_000, maxContextWindow: 1_000_000 };
-      const spy = vi.spyOn(oauthSeeds, 'buildOpenAiOAuthModels').mockReturnValue([bigger, ...seeds]);
+      const astra = seeds.find(m => m.id === 'gpt-6-astra')!;
+      const bigger = { ...astra, id: 'gpt-6-zz-big', contextWindow: 500_000, maxContextWindow: 1_000_000 };
+      // Same window as astra, larger ceiling: a tie must not hand over the wider one.
+      const tied = { ...astra, id: 'gpt-6-zz-tied', maxContextWindow: 950_000 };
+      const spy = vi.spyOn(oauthSeeds, 'buildOpenAiOAuthModels').mockReturnValue([bigger, tied, ...seeds]);
       const mockRegistry: ProviderRegistry = {
         version: 1,
         providers: [{
