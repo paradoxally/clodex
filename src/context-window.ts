@@ -1,8 +1,8 @@
 // Context window resolution for proxy /v1/models and Claude Code child env.
 //
 // Priority:
-//   1. OpenCode models.json cache (limit.input, else limit.context) — `opencode` / `opencode-go`
-//      file keys first
+//   1. OpenCode models.json cache (limit.context) — `opencode` / `opencode-go` file keys first,
+//      lowered to the `openai` entry's limit.input where it states one
 //   2. ID-pattern heuristics for models not in cache
 //   3. 200K default (Claude Code's own fallback for unknown models)
 import { readFileSync } from 'node:fs';
@@ -13,9 +13,9 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
 /** OpenCode cache file provider keys (metadata enrichment only, not clodex registry ids). */
 const CACHE_PROVIDER_PRIORITY = new Set(['opencode', 'opencode-go']);
 
-/** Cache keys whose own input cap outranks resellers that state none. OpenAI enforces
- *  the cap it publishes: gpt-6-luna rejects input above its stated 922,000. */
-const INPUT_CAP_AUTHORITY = new Set(['openai']);
+/** The one cache key whose `limit.input` lowers a window. OpenAI enforces the cap it
+ *  publishes: gpt-6-luna rejects input above its stated 922,000. */
+const INPUT_CAP_PROVIDER = 'openai';
 
 export interface OpencodeCacheModel {
   id?: string;
@@ -87,8 +87,8 @@ export function loadOpencodeCache(): OpencodeCacheFile | null {
 /** Build a model-id → context-window map from OpenCode cache data. Exported for tests. */
 export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, number> {
   const index = new Map<string, number>();
-  const priority = new Map<string, { total: number; window: number }>();
-  const allLimits = new Map<string, Array<{ total: number; input?: number; authority: boolean }>>();
+  const allLimits = new Map<string, number[]>();
+  const openAiInputCaps = new Map<string, number>();
 
   for (const [providerKey, providerData] of Object.entries(cache)) {
     const models = providerData?.models;
@@ -96,54 +96,33 @@ export function buildContextWindowIndex(cache: OpencodeCacheFile): Map<string, n
     for (const [modelId, entry] of Object.entries(models)) {
       const ctx = entry.limit?.context;
       if (typeof ctx !== 'number' || ctx <= 0) continue;
-      const rawInput = entry.limit?.input;
-      // Only an input limit below the total is a cap; several resellers restate
-      // their total as `input`, which says nothing about the split.
-      const input = typeof rawInput === 'number' && rawInput > 0 && rawInput < ctx
-        ? rawInput
-        : undefined;
 
       const limits = allLimits.get(modelId) ?? [];
-      limits.push({ total: ctx, input, authority: INPUT_CAP_AUTHORITY.has(providerKey) });
+      limits.push(ctx);
       allLimits.set(modelId, limits);
 
-      // Claude Code fills the window it is told with input, so the input cap is
-      // the usable window.
       if (CACHE_PROVIDER_PRIORITY.has(providerKey)) {
-        priority.set(modelId, { total: ctx, window: input ?? ctx });
+        index.set(modelId, ctx);
+      }
+
+      const input = entry.limit?.input;
+      if (providerKey === INPUT_CAP_PROVIDER && typeof input === 'number' && input > 0 && input < ctx) {
+        openAiInputCaps.set(modelId, input);
       }
     }
   }
 
-  // The model maker's own cap at the same total still binds a priority entry that
-  // states none: OpenCode lists gpt-5.3-codex-spark at a flat 128,000 while OpenAI
-  // caps its input at 100,000.
-  //
-  // Otherwise: the largest total any provider offers, capped by the model maker's
-  // own stated cap at that total, else only when most providers offering it state
-  // one. Many entries derive `input` as total minus output, so a minority of
-  // resellers cannot cap a total the others leave whole, and a smaller reseller's
-  // cap never shrinks it. A lone provider's cap is the only data there is, and is
-  // kept.
   for (const [modelId, limits] of allLimits) {
-    const chosen = priority.get(modelId);
-    if (chosen) {
-      const makerCap = limits.find(
-        limit => limit.authority && limit.total === chosen.total && limit.input !== undefined,
-      )?.input;
-      index.set(modelId, makerCap === undefined ? chosen.window : Math.min(chosen.window, makerCap));
-      continue;
+    if (!index.has(modelId)) {
+      index.set(modelId, Math.max(...limits));
     }
-    const largest = Math.max(...limits.map(limit => limit.total));
-    const atLargest = limits.filter(limit => limit.total === largest);
-    const authorityCap = atLargest.find(limit => limit.authority && limit.input !== undefined)?.input;
-    const caps = atLargest
-      .map(limit => limit.input)
-      .filter((input): input is number => input !== undefined);
-    index.set(
-      modelId,
-      authorityCap ?? (caps.length * 2 > atLargest.length ? Math.max(...caps) : largest),
-    );
+  }
+
+  // Claude Code fills the window it is told with input, so an enforced input cap
+  // is the usable window. Other providers' `input` is often just total minus
+  // output rather than a limit anyone enforces, so it is not read.
+  for (const [modelId, cap] of openAiInputCaps) {
+    index.set(modelId, Math.min(index.get(modelId) ?? cap, cap));
   }
 
   return index;

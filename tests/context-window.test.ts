@@ -96,76 +96,17 @@ describe('buildContextWindowIndex', () => {
   // OpenAI caps INPUT at 922,000 on a 1,050,000 window. Claude Code compacts about
   // 33,000 below what it is told, so reporting the total let a session grow past the
   // input cap and die with context_length_exceeded before it ever compacted.
-  it('reports the input limit, not the total, when an entry declares one', () => {
+  it("lowers the cross-provider window to OpenAI's own input cap", () => {
     const index = buildContextWindowIndex({
-      opencode: {
-        models: { 'gpt-5.5': { limit: { context: 1_050_000, input: 922_000, output: 128_000 } } },
-      },
+      llmgateway: { models: { 'gpt-6-luna': { limit: { context: 1_050_000, output: 1_050_000 } } } },
+      openai: { models: { 'gpt-6-luna': { limit: { context: 1_050_000, input: 922_000 } } } },
     });
-    expect(index.get('gpt-5.5')).toBe(922_000);
+    expect(index.get('gpt-6-luna')).toBe(922_000);
   });
 
-  it('keeps the total when an entry declares no input limit', () => {
-    const index = buildContextWindowIndex({
-      opencode: { models: { 'kimi-k2.6': { limit: { context: 262_144, output: 32_768 } } } },
-    });
-    expect(index.get('kimi-k2.6')).toBe(262_144);
-  });
-
-  // nano-gpt restates its own smaller total as `input`. That is its offer, not a cap
-  // on the model, and must not shrink the 1,000,000 every other provider lists.
-  it('does not let a smaller reseller restating its total as input shrink the window', () => {
-    const index = buildContextWindowIndex({
-      'nano-gpt': { models: { 'qwen/qwen3-coder-plus': { limit: { context: 128_000, input: 128_000 } } } },
-      openrouter: { models: { 'qwen/qwen3-coder-plus': { limit: { context: 1_000_000 } } } },
-    });
-    expect(index.get('qwen/qwen3-coder-plus')).toBe(1_000_000);
-  });
-
-  it('does not let a smaller provider split shrink a larger total', () => {
-    const index = buildContextWindowIndex({
-      small: { models: { 'some-model': { limit: { context: 200_000, input: 160_000 } } } },
-      smaller: { models: { 'some-model': { limit: { context: 128_000, input: 96_000 } } } },
-      vendor: { models: { 'some-model': { limit: { context: 1_000_000 } } } },
-    });
-    expect(index.get('some-model')).toBe(1_000_000);
-  });
-
-  // Shape taken from the real cache: seven providers list openai/o3-pro at 200,000
-  // with no input limit; one derives input as total minus output. One provider is
-  // not evidence of a cap.
-  it('ignores an input limit only a minority of same-total providers declare', () => {
-    const index = buildContextWindowIndex({
-      vercel: { models: { 'openai/o3-pro': { limit: { context: 200_000, input: 100_000 } } } },
-      openrouter: { models: { 'openai/o3-pro': { limit: { context: 200_000 } } } },
-      kilo: { models: { 'openai/o3-pro': { limit: { context: 200_000 } } } },
-    });
-    expect(index.get('openai/o3-pro')).toBe(200_000);
-  });
-
-  it('leaves the total when same-total resellers split evenly on a cap', () => {
-    const index = buildContextWindowIndex({
-      a: { models: { 'tie-model': { limit: { context: 400_000, input: 272_000 } } } },
-      b: { models: { 'tie-model': { limit: { context: 400_000 } } } },
-    });
-    expect(index.get('tie-model')).toBe(400_000);
-  });
-
-  // Shape taken from the real cache: gpt-5-pro splits 3-3 between providers stating
-  // 272,000 and providers stating none. OpenAI's own entry is one of the three, and
-  // OpenAI enforces the cap it states, so it must not be outvoted.
-  it("honours OpenAI's own input cap even when resellers outnumber it", () => {
-    const index = buildContextWindowIndex({
-      openai: { models: { 'gpt-5-pro': { limit: { context: 400_000, input: 272_000 } } } },
-      azure: { models: { 'gpt-5-pro': { limit: { context: 400_000 } } } },
-      jiekou: { models: { 'gpt-5-pro': { limit: { context: 400_000 } } } },
-    });
-    expect(index.get('gpt-5-pro')).toBe(272_000);
-  });
-
-  // Shape taken from the real cache: OpenCode's own entry for gpt-5.3-codex-spark
-  // states no cap, while OpenAI caps input at 100,000 on the same 128,000 total.
-  it("applies OpenAI's own cap to a priority entry that states none", () => {
+  // Shape taken from the real cache: OpenCode lists gpt-5.3-codex-spark at a flat
+  // 128,000 while OpenAI caps its input at 100,000.
+  it("lowers a priority opencode entry to OpenAI's own input cap", () => {
     const index = buildContextWindowIndex({
       opencode: { models: { 'gpt-5.3-codex-spark': { limit: { context: 128_000, input: 128_000 } } } },
       openai: { models: { 'gpt-5.3-codex-spark': { limit: { context: 128_000, input: 100_000 } } } },
@@ -173,64 +114,45 @@ describe('buildContextWindowIndex', () => {
     expect(index.get('gpt-5.3-codex-spark')).toBe(100_000);
   });
 
-  it("does not let OpenAI's cap at another total override a priority entry", () => {
+  it("never raises a smaller window to OpenAI's input cap", () => {
     const index = buildContextWindowIndex({
-      opencode: { models: { 'zen-model': { limit: { context: 1_000_000 } } } },
-      openai: { models: { 'zen-model': { limit: { context: 400_000, input: 272_000 } } } },
+      opencode: { models: { 'some-gpt': { limit: { context: 200_000 } } } },
+      openai: { models: { 'some-gpt': { limit: { context: 1_050_000, input: 922_000 } } } },
     });
-    expect(index.get('zen-model')).toBe(1_000_000);
+    expect(index.get('some-gpt')).toBe(200_000);
   });
 
-  // Shape taken from the real cache: requesty alone lists gpt-5.5@eu, passing
-  // OpenAI's real 922,000 cap through. With no other provider to disagree, it holds.
-  it("keeps a lone provider's input cap", () => {
+  it('ignores an OpenAI input that is not below its total', () => {
     const index = buildContextWindowIndex({
-      requesty: { models: { 'gpt-5.5@eu': { limit: { context: 1_050_000, input: 922_000 } } } },
+      openai: {
+        models: {
+          'flat-model': { limit: { context: 128_000, input: 128_000 } },
+          'odd-model': { limit: { context: 128_000, input: 400_000 } },
+        },
+      },
+      reseller: {
+        models: {
+          'flat-model': { limit: { context: 1_000_000 } },
+          'odd-model': { limit: { context: 1_000_000 } },
+        },
+      },
     });
-    expect(index.get('gpt-5.5@eu')).toBe(922_000);
+    expect(index.get('flat-model')).toBe(1_000_000);
+    expect(index.get('odd-model')).toBe(1_000_000);
   });
 
-  it("does not let OpenAI's cap at a smaller total shrink a larger one", () => {
+  // Many entries derive `input` as total minus output rather than stating an
+  // enforced limit, so nobody but OpenAI's own entry may lower a window with it.
+  it('ignores input limits from every provider but openai', () => {
     const index = buildContextWindowIndex({
-      openai: { models: { 'bigger-elsewhere': { limit: { context: 128_000, input: 100_000 } } } },
-      vendor: { models: { 'bigger-elsewhere': { limit: { context: 1_000_000 } } } },
-    });
-    expect(index.get('bigger-elsewhere')).toBe(1_000_000);
-  });
-
-  it('takes the most generous cap when same-total providers disagree on it', () => {
-    const index = buildContextWindowIndex({
-      a: { models: { 'split-model': { limit: { context: 1_000_000, input: 800_000 } } } },
-      b: { models: { 'split-model': { limit: { context: 1_000_000, input: 900_000 } } } },
-    });
-    expect(index.get('split-model')).toBe(900_000);
-  });
-
-  it('never reports an input limit larger than the total', () => {
-    const index = buildContextWindowIndex({
-      opencode: { models: { 'odd-model': { limit: { context: 128_000, input: 400_000 } } } },
-    });
-    expect(index.get('odd-model')).toBe(128_000);
-  });
-
-  it('uses the input limit from a prioritised opencode-go entry too', () => {
-    const index = buildContextWindowIndex({
+      opencode: { models: { 'gpt-5.5': { limit: { context: 1_050_000, input: 922_000 } } } },
       'opencode-go': { models: { hy3: { limit: { context: 256_000, input: 192_000 } } } },
+      vercel: { models: { 'openai/o3-pro': { limit: { context: 200_000, input: 100_000 } } } },
+      openrouter: { models: { 'openai/o3-pro': { limit: { context: 200_000 } } } },
     });
-    expect(index.get('hy3')).toBe(192_000);
-  });
-
-  // Shape taken from the real cache: every provider that lists gpt-6-astra declares
-  // input 922,000 except one that states only the 1,050,000 total. Taking the plain
-  // max would let that one entry restore the window that kills the session.
-  it('lets declared input limits outrank a total-only entry across providers', () => {
-    const index = buildContextWindowIndex({
-      llmgateway: { models: { 'gpt-6-luna': { limit: { context: 1_050_000, output: 1_050_000 } } } },
-      vivgrid: { models: { 'gpt-6-luna': { limit: { context: 1_050_000, input: 922_000 } } } },
-      azure: { models: { 'gpt-6-luna': { limit: { context: 1_050_000, input: 922_000 } } } },
-      requesty: { models: { 'gpt-6-luna': { limit: { context: 1_050_000, input: 922_000 } } } },
-    });
-    expect(index.get('gpt-6-luna')).toBe(922_000);
+    expect(index.get('gpt-5.5')).toBe(1_050_000);
+    expect(index.get('hy3')).toBe(256_000);
+    expect(index.get('openai/o3-pro')).toBe(200_000);
   });
 
   it('ignores entries without limit.context', () => {
@@ -263,6 +185,10 @@ describe('lookupKnownContextWindow', () => {
     // `qwen` maps to 131,072; the cache entry must win, or tier 1 has been skipped.
     expect(contextWindowFromHeuristics('qwen-fixture-7b')).toBe(131_072);
     expect(lookupKnownContextWindow('qwen-fixture-7b')).toBe(40_960);
+  });
+
+  it('reports 922,000 for a gpt-6 id the cache does not list', () => {
+    expect(lookupKnownContextWindow('gpt-6-luna')).toBe(922_000);
   });
 
   it('reports the heuristic window for a model a rule claims (tier 2)', () => {
