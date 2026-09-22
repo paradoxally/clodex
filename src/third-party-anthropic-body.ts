@@ -32,7 +32,18 @@
 // A message left holding only the advisor's own blocks gets the same
 // `[Advisor response]` placeholder Claude Code substitutes, because an
 // assistant turn with no content of its own is not a valid request.
+//
+// Tool schemas get the same `pattern` sanitizing the translated path already
+// applies (tool-schema-sanitize.ts). A raw Anthropic-format relay used to skip
+// it, and Claude Code 2.1.278's Artifact tool carries `^[^\0]*$` on
+// `file_paths`: OpenCode Go's deepseek-v4.1-flash answers any request with
+// that regex 400 `{"model":"<id>"}` — Artifact ships on every interactive
+// request, so the session was dead from `hello` onward — while its minimax-m3
+// and qwen3.7-max on the same endpoint accept it (measured 2026-09-22). The
+// scanner cannot tell those backends apart, so a compatible model loses the
+// constraint too; that is the trade the sanitizer module already makes.
 
+import { sanitizeToolSchema } from './tool-schema-sanitize.js';
 import { toolAdditionName } from './tool-search.js';
 
 type Block = Record<string, unknown>;
@@ -60,7 +71,22 @@ export function anthropicBodyForUpstream<T extends Record<string, unknown>>(
   upstream: AnthropicUpstream,
 ): T {
   if (isAnthropicFirstPartyUpstream(upstream)) return body;
-  return stripAdvisorTool(stripToolAdditions(body));
+  return sanitizeToolSchemas(stripAdvisorTool(stripToolAdditions(body)));
+}
+
+/** Returns `body` itself when every tool schema is already compatible; never mutates it. */
+function sanitizeToolSchemas<T extends Record<string, unknown>>(body: T): T {
+  const tools = body.tools;
+  if (!Array.isArray(tools)) return body;
+  let changed = false;
+  const cleaned = tools.map(tool => {
+    if (!isBlock(tool) || !('input_schema' in tool)) return tool;
+    const schema = sanitizeToolSchema(tool.input_schema);
+    if (schema === tool.input_schema) return tool;
+    changed = true;
+    return { ...tool, input_schema: schema };
+  });
+  return changed ? { ...body, tools: cleaned } : body;
 }
 
 function hasToolAddition(content: unknown): boolean {
@@ -202,3 +228,4 @@ export function stripAdvisorTool<T extends Record<string, unknown>>(body: T): T 
   }
   return cleaned as T;
 }
+

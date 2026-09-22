@@ -79,13 +79,18 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   change non-streaming responses' existing omission of reasoning, or the transport's prohibition
   on replaying already-emitted model output. The guarantee covers SDK-visible summary text,
   grouping and encrypted content, not output-only fields the SDK omits (such as `status`).
-- **A tool schema's regexes are dropped when they hit a known Python incompatibility**, on every
-  route but Anthropic-format ones (`src/tool-schema-sanitize.ts`). OpenAI rejects the same
-  constructs python-jsonschema does — its 400 reads `'<pattern>' is not a 'regex'`, that library's
-  format-checker wording — while Claude Code's built-ins are written in ECMAScript. (That is
-  behaviour observed from outside, not knowledge of what OpenAI runs.) Artifact's `field` constraint
-  uses `\p{Cc}`, Python answers `bad escape \p`, and since Artifact ships on every request, every
-  request 400d and the session was dead from `hello` onward (#194).
+- **A tool schema's regexes are dropped when they hit a construct a far side is known not to
+  compile**, on every route except Anthropic itself (`src/tool-schema-sanitize.ts`; the raw
+  Anthropic-format relay to a third party runs it through `anthropicBodyForUpstream`). OpenAI
+  rejects the same constructs python-jsonschema does — its 400 reads `'<pattern>' is not a
+  'regex'`, that library's format-checker wording — while Claude Code's built-ins are written in
+  ECMAScript. (That is behaviour observed from outside, not knowledge of what OpenAI runs.)
+  Artifact's `field` constraint uses `\p{Cc}`, Python answers `bad escape \p`, and since Artifact
+  ships on every interactive request, every request 400d and the session was dead from `hello`
+  onward (#194). OpenCode Go's deepseek-v4.1-flash adds one construct Python does compile: an
+  octal escape inside a character class — 2.1.278's Artifact `file_paths` pattern `^[^\0]*$` — and
+  answers it 400 `{"model":"<id>"}` on `/v1/messages`, while minimax-m3 and qwen3.7-max on the same
+  endpoint accept it (measured 2026-09-22). One scanner serves both far sides.
   Two positions are regex-valued and both are checked: the `pattern` keyword, and every **key** of
   `patternProperties` (the 2020-12 applicator vocabulary gives `patternProperties.propertyNames`
   `format: "regex"`; a bad key returns the same 400). An incompatible `patternProperties` key is
