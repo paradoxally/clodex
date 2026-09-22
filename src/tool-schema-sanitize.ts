@@ -16,6 +16,14 @@
 // request carrying that tool 400s before the model sees the turn — Artifact
 // ships on every request, so the session was dead from `hello` onward (#194).
 //
+// The scanner is not only about Python. A raw Anthropic-format relay to a third
+// party runs it too (third-party-anthropic-body.ts), and OpenCode Go's
+// deepseek-v4.1-flash rejects a construct Python accepts — an octal escape
+// inside a character class (2.1.278's Artifact `file_paths`, `^[^\0]*$`). One
+// scanner serves both far sides, so each loses the constraints the other
+// cannot compile; that is cheaper than a dialect per route and, as below, only
+// ever loosens.
+//
 // Two regex-valued positions exist, and the far side compiles both: the
 // `pattern` keyword, and every **key** of `patternProperties`
 // (`patternProperties.propertyNames` carries `format: "regex"` in the 2020-12
@@ -112,6 +120,11 @@ export function isCompatiblePattern(pattern: string): boolean {
       // \k<name>: a JS named backreference; Python spells it (?P=name) and
       // answers "bad escape \k".
       if (next === 'k' && pattern[i + 2] === '<') return false;
+      // \0 / \101 inside a class: an octal escape. Python compiles it, but
+      // OpenCode Go's deepseek-v4.1-flash answers 400 to `[^\0]` and `[^\101]`
+      // while taking `[^\x00]`, `[^\u0000]` and a bare `a\0b` (measured
+      // 2026-09-22). Artifact's `file_paths` pattern is exactly `^[^\0]*$`.
+      if (inClass && next !== undefined && next >= '0' && next <= '9') return false;
       i++; // an escaped character never starts a construct
       continue;
     }

@@ -611,6 +611,32 @@ blocks named `advisor` from assistant messages, and when that leaves a message e
 thinking and blank text it appends `{type:"text",text:"[Advisor response]",citations:[]}`.
 `src/third-party-anthropic-body.ts` mirrors that rule.
 
+## Artifact's `file_paths` regex kills a Go DeepSeek session from `hello` (verified 2.1.278, darwin-arm64)
+
+2.1.278's Artifact tool constrains `file_paths` items with `pattern: "^[^\\0]*$"`. Artifact is
+interactive-only — a `-p` run, a subagent or a background agent never sends it, which is why the
+headless probe answered while the TUI died on its first turn — and it ships on every interactive
+request, so nothing the user types can avoid it.
+
+**What rejects it, measured 2026-09-22 against `https://opencode.ai/zen/go/v1/messages`.**
+`deepseek-v4.1-flash` answers HTTP 400 `{"model":"deepseek-v4.1-flash"}` — no message, the same
+opaque body as the advisor and `tool_addition` rejections — to any request carrying an octal
+escape inside a character class: `[^\\0]` and `[^\\101]` both 400. The hex, unicode and
+out-of-class spellings pass (`[^\\x00]`, `[^\\u0000]`, `a\\0b` all 200). `minimax-m3` and
+`qwen3.7-max` on the same endpoint accept the untouched body, so this is one backend's regex
+dialect, not Go's request validation. Python's `re` compiles `\\0`, so the OpenAI-facing scanner
+in `src/tool-schema-sanitize.ts` did not recognise it, and the raw Anthropic-format relay in
+`src/proxy.ts`/`src/server/router.ts` never ran the scanner at all — only the SDK translation path
+did. Both are closed: `anthropicBodyForUpstream` now sanitizes tool schemas for any non-Anthropic
+upstream, and the scanner drops a backslash-digit escape inside a class.
+
+**Not the cause, each ruled out on the live endpoint:** the `role: "system"` message in `messages`
+(a SessionStart hook's output; Go accepts it), `thinking.display: "updates"`, `context_management`,
+`diagnostics`, `cache_control.scope: "global"`, the `DeferredToolPlaceholder` tool, and the
+`x-claude-code-session-id` header. Bisect the body — see the memory note on replaying variants
+with the stored key — rather than reason from the field names; three of those looked new and
+guilty and were neither.
+
 ## Things that looked like clodex bugs and were not (not version-specific)
 
 - **"Concurrent subagents died at turn 2" was not unknown-model classification.** The agents' first

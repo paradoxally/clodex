@@ -51,6 +51,19 @@ describe('isCompatiblePattern', () => {
     expect(isCompatiblePattern(String.raw`a\k<y>`)).toBe(false);
   });
 
+  it('rejects an octal escape inside a character class, which OpenCode Go\'s DeepSeek backend cannot compile', () => {
+    // 2.1.278 Artifact `file_paths` items, verbatim. Python compiles `\0`; Go's
+    // deepseek-v4.1-flash answers 400 to it and to `\101`, and takes the hex,
+    // unicode and out-of-class spellings (measured 2026-09-22).
+    expect(isCompatiblePattern(String.raw`^[^\0]*$`)).toBe(false);
+    expect(isCompatiblePattern(String.raw`^[^\101]*$`)).toBe(false);
+    expect(isCompatiblePattern(String.raw`^[^\x00]*$`)).toBe(true);
+    expect(isCompatiblePattern(String.raw`^[^\u0000]*$`)).toBe(true);
+    expect(isCompatiblePattern(String.raw`^a\0b$`)).toBe(true);
+    // An escaped backslash before a digit is a literal backslash, not an escape.
+    expect(isCompatiblePattern(String.raw`^[^\\0]*$`)).toBe(true);
+  });
+
   it('reads `(?<` inside a character class as three literal characters', () => {
     // A class listing `(`, `?` and `<` is not a named group. Python compiles it.
     expect(isCompatiblePattern(String.raw`^[(?<]+$`)).toBe(true);
@@ -77,6 +90,33 @@ describe('sanitizeToolSchema', () => {
         collection: { type: 'string', pattern: ARTIFACT_COLLECTION_PATTERN, maxLength: 1000 },
       },
       required: ['field'],
+    });
+  });
+
+  it('drops the 2.1.278 Artifact `file_paths` items pattern and keeps every sibling constraint', () => {
+    const sanitized = sanitizeToolSchema({
+      type: 'object',
+      properties: {
+        file_paths: {
+          type: 'array',
+          items: { type: 'string', minLength: 1, maxLength: 1024, pattern: String.raw`^[^\0]*$` },
+          minItems: 1,
+          maxItems: 25,
+        },
+        asset_ids: { type: 'array', items: { type: 'string', pattern: '^[0-9a-f]{32}$' } },
+      },
+    });
+    expect(sanitized).toEqual({
+      type: 'object',
+      properties: {
+        file_paths: {
+          type: 'array',
+          items: { type: 'string', minLength: 1, maxLength: 1024 },
+          minItems: 1,
+          maxItems: 25,
+        },
+        asset_ids: { type: 'array', items: { type: 'string', pattern: '^[0-9a-f]{32}$' } },
+      },
     });
   });
 

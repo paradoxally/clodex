@@ -338,7 +338,67 @@ describe('anthropicBodyForUpstream', () => {
 
     expect(wireText(anthropicBodyForUpstream(advisorBody(), go))).not.toContain('advisor');
   });
+
+  it('drops a tool-schema regex the upstream cannot compile, and nothing else about the tool', () => {
+    const go = { providerId: 'opencode-go', baseUrl: 'https://opencode.ai/zen/go' };
+    const body = artifactBody();
+    const cleaned = anthropicBodyForUpstream(body, go);
+
+    expect(cleaned).not.toBe(body);
+    expect(cleaned.messages).toBe(body.messages);
+    expect(cleaned.tools[0]).toBe(body.tools[0]);
+    expect(cleaned.tools[1]).toEqual({
+      ...body.tools[1],
+      input_schema: {
+        type: 'object',
+        properties: {
+          file_paths: { type: 'array', items: { type: 'string', minLength: 1 }, maxItems: 25 },
+          after: { type: 'string', pattern: '^[A-Za-z0-9_=-]{1,4096}$' },
+        },
+      },
+    });
+    expect(body.tools[1].input_schema.properties.file_paths.items.pattern).toBe(String.raw`^[^\0]*$`);
+  });
+
+  it('returns a body whose tool schemas are all compatible by identity', () => {
+    const body = { ...artifactBody(), tools: [artifactBody().tools[0]] };
+    expect(anthropicBodyForUpstream(body, { providerId: 'opencode-go', baseUrl: 'https://opencode.ai/zen/go' })).toBe(body);
+  });
+
+  it('leaves the same regex alone on the way to Anthropic itself', () => {
+    const body = artifactBody();
+    expect(anthropicBodyForUpstream(body, { providerId: 'anthropic', baseUrl: 'https://api.anthropic.com' })).toBe(body);
+  });
 });
+
+/** The 2.1.278 Artifact tool as it reaches a Go route: `file_paths` carries the regex Go's DeepSeek rejects. */
+function artifactBody(): Record<string, any> {
+  return {
+    model: 'deepseek-v4.1-flash',
+    max_tokens: 64,
+    stream: false,
+    tools: [
+      { name: 'Bash', input_schema: schema },
+      {
+        name: 'Artifact',
+        description: 'Publish a page.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            file_paths: {
+              type: 'array',
+              items: { type: 'string', minLength: 1, pattern: String.raw`^[^\0]*$` },
+              maxItems: 25,
+            },
+            after: { type: 'string', pattern: '^[A-Za-z0-9_=-]{1,4096}$' },
+          },
+        },
+        cache_control: hourCache,
+      },
+    ],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+  };
+}
 
 function postToProxy(port: number, token: string, body: unknown, path = '/v1/messages'): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -430,6 +490,12 @@ describe('proxy-mode passthrough', () => {
         { type: 'text', text: 'Docs server connected.', cache_control: hourCache },
       ]);
       expect(sent[1]!.body).toEqual({ ...toolSearchResultBody(), model: 'deepseek-v4.1-flash' });
+
+      expect(await postToProxy(handle.port, handle.token, { ...artifactBody(), model: goRoute.aliasId })).toBe(200);
+      const artifact = sent[3]!.body.tools.find((tool: any) => tool.name === 'Artifact');
+      expect(artifact.input_schema.properties.file_paths.items).toEqual({ type: 'string', minLength: 1 });
+      expect(artifact.input_schema.properties.after.pattern).toBe('^[A-Za-z0-9_=-]{1,4096}$');
+      expect(artifact.cache_control).toEqual(hourCache);
     } finally {
       handle.close();
     }
