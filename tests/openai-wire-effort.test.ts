@@ -18,7 +18,11 @@ import { effortProviderOptions } from '../src/provider-factory.js';
  * exists to override, and this is the only test that would notice if it stopped
  * working.
  */
-async function emittedRequestBody(modelId: string, effort: string): Promise<Record<string, unknown>> {
+async function emittedRequestBody(
+  modelId: string,
+  effort: string,
+  temperature?: number,
+): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> | undefined;
   const provider = createOpenAI({
     apiKey: 'test-key',
@@ -38,6 +42,7 @@ async function emittedRequestBody(modelId: string, effort: string): Promise<Reco
 
   await provider.responses(modelId).doGenerate({
     prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    temperature,
     providerOptions: effortProviderOptions(
       '@ai-sdk/openai',
       effort,
@@ -71,5 +76,26 @@ describe('OpenAI reasoning effort on the wire', () => {
   it('sends no reasoning block for a model clodex will not admit', async () => {
     const body = await emittedRequestBody('gpt-4o', 'high');
     expect(body.reasoning).toBeUndefined();
+  });
+
+  it('sends the none effort for gpt-6-luna', async () => {
+    const body = await emittedRequestBody('gpt-6-luna', 'none');
+    expect(body.reasoning).toMatchObject({ effort: 'none' });
+  });
+
+  // gpt-6-luna answers 400 "'temperature' is not supported with this model" to any
+  // value but 1. The SDK only strips it for a model it treats as reasoning, and its
+  // own id list stops at gpt-5, so forceReasoning is what keeps it off the wire.
+  // 'none' is included because the SDK keeps temperature for 'none' on gpt-5.1..5.6.
+  it.each(['high', 'none'])('strips temperature from a gpt-6-luna request at %s effort', async effort => {
+    const body = await emittedRequestBody('gpt-6-luna', effort, 0.5);
+    expect(body.temperature).toBeUndefined();
+  });
+
+  // Control: the same stub forwards temperature for a model with no reasoning, so the
+  // assertion above is measuring the strip, not a stub that never sends it.
+  it('forwards temperature for a model that does not reason', async () => {
+    const body = await emittedRequestBody('gpt-4o', 'high', 0.5);
+    expect(body.temperature).toBe(0.5);
   });
 });

@@ -44,6 +44,12 @@ describe('contextWindowFromHeuristics', () => {
     ['deepseek-v4-flash', 1_000_000],
     ['deepseek-chat', 64_000],
     ['gpt-5.4', 1_000_000],
+    ['gpt-5.6-luna', 1_000_000],
+    ['gpt-6-luna', 922_000],
+    ['gpt-6-sol', 922_000],
+    ['gpt-6-astra', 922_000],
+    ['openai/gpt-6-luna', 922_000],
+    ['gpt-60-mini', DEFAULT_CONTEXT_WINDOW],
     ['gpt-4o-mini', 128_000],
     ['qwen3.6-plus-free', 262_144],
     ['kimi-k2.6', 262_144],
@@ -71,12 +77,90 @@ describe('buildContextWindowIndex', () => {
     expect(index.get('claude-sonnet-4-6')).toBe(1_000_000);
   });
 
+  it('keeps the opencode entry even when another provider lists a larger window', () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'glm-5.1': { limit: { context: 204_800 } } } },
+      crof: { models: { 'glm-5.1': { limit: { context: 1_000_000 } } } },
+    });
+    expect(index.get('glm-5.1')).toBe(204_800);
+  });
+
   it('uses max across providers when opencode keys are absent', () => {
     const index = buildContextWindowIndex({
       frogbot: { models: { 'gemini-2.5-flash': { limit: { context: 200_000 } } } },
       google: { models: { 'gemini-2.5-flash': { limit: { context: 1_048_576 } } } },
     });
     expect(index.get('gemini-2.5-flash')).toBe(1_048_576);
+  });
+
+  // OpenAI caps INPUT at 922,000 on a 1,050,000 window. Claude Code compacts about
+  // 33,000 below what it is told, so reporting the total let a session grow past the
+  // input cap and die with context_length_exceeded before it ever compacted.
+  it("lowers the cross-provider window to OpenAI's own input cap", () => {
+    const index = buildContextWindowIndex({
+      llmgateway: { models: { 'gpt-6-luna': { limit: { context: 1_050_000, output: 1_050_000 } } } },
+      openai: { models: { 'gpt-6-luna': { limit: { context: 1_050_000, input: 922_000 } } } },
+    });
+    expect(index.get('gpt-6-luna')).toBe(922_000);
+  });
+
+  // Shape taken from the real cache: OpenCode lists gpt-5.3-codex-spark at a flat
+  // 128,000 while OpenAI caps its input at 100,000.
+  it("lowers a priority opencode entry to OpenAI's own input cap", () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'gpt-5.3-codex-spark': { limit: { context: 128_000, input: 128_000 } } } },
+      openai: { models: { 'gpt-5.3-codex-spark': { limit: { context: 128_000, input: 100_000 } } } },
+    });
+    expect(index.get('gpt-5.3-codex-spark')).toBe(100_000);
+  });
+
+  it("never raises a smaller window to OpenAI's input cap", () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'some-gpt': { limit: { context: 200_000 } } } },
+      openai: { models: { 'some-gpt': { limit: { context: 1_050_000, input: 922_000 } } } },
+    });
+    expect(index.get('some-gpt')).toBe(200_000);
+  });
+
+  it("leaves a window larger than OpenAI's own listed total alone", () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'zen-model': { limit: { context: 1_000_000 } } } },
+      openai: { models: { 'zen-model': { limit: { context: 128_000, input: 100_000 } } } },
+    });
+    expect(index.get('zen-model')).toBe(1_000_000);
+  });
+
+  it('ignores an OpenAI input that is not below its total', () => {
+    const index = buildContextWindowIndex({
+      openai: {
+        models: {
+          'flat-model': { limit: { context: 128_000, input: 128_000 } },
+          'odd-model': { limit: { context: 128_000, input: 400_000 } },
+        },
+      },
+      reseller: {
+        models: {
+          'flat-model': { limit: { context: 1_000_000 } },
+          'odd-model': { limit: { context: 1_000_000 } },
+        },
+      },
+    });
+    expect(index.get('flat-model')).toBe(1_000_000);
+    expect(index.get('odd-model')).toBe(1_000_000);
+  });
+
+  // Many entries derive `input` as total minus output rather than stating an
+  // enforced limit, so nobody but OpenAI's own entry may lower a window with it.
+  it('ignores input limits from every provider but openai', () => {
+    const index = buildContextWindowIndex({
+      opencode: { models: { 'gpt-5.5': { limit: { context: 1_050_000, input: 922_000 } } } },
+      'opencode-go': { models: { hy3: { limit: { context: 256_000, input: 192_000 } } } },
+      vercel: { models: { 'openai/o3-pro': { limit: { context: 200_000, input: 100_000 } } } },
+      openrouter: { models: { 'openai/o3-pro': { limit: { context: 200_000 } } } },
+    });
+    expect(index.get('gpt-5.5')).toBe(1_050_000);
+    expect(index.get('hy3')).toBe(256_000);
+    expect(index.get('openai/o3-pro')).toBe(200_000);
   });
 
   it('ignores entries without limit.context', () => {
@@ -109,6 +193,10 @@ describe('lookupKnownContextWindow', () => {
     // `qwen` maps to 131,072; the cache entry must win, or tier 1 has been skipped.
     expect(contextWindowFromHeuristics('qwen-fixture-7b')).toBe(131_072);
     expect(lookupKnownContextWindow('qwen-fixture-7b')).toBe(40_960);
+  });
+
+  it('reports 922,000 for a gpt-6 id the cache does not list', () => {
+    expect(lookupKnownContextWindow('gpt-6-luna')).toBe(922_000);
   });
 
   it('reports the heuristic window for a model a rule claims (tier 2)', () => {
