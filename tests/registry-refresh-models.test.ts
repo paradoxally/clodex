@@ -384,6 +384,38 @@ describe('registry/refresh-models', () => {
       expect(byId.get('gpt-5.9-test')?.contextWindow).toBe(1_000_000);
     });
 
+    it('takes the smallest gpt-6 seed window whatever the seed order', async () => {
+      const oauthSeeds = await import('../src/data/openai-oauth-models.js');
+      const seeds = oauthSeeds.buildOpenAiOAuthModels();
+      const bigger = { ...seeds.find(m => m.id === 'gpt-6-astra')!, id: 'gpt-6-zz-big', contextWindow: 500_000, maxContextWindow: 1_000_000 };
+      const spy = vi.spyOn(oauthSeeds, 'buildOpenAiOAuthModels').mockReturnValue([bigger, ...seeds]);
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ models: [{ slug: 'gpt-6-luna', title: 'Luna' }] }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+      spy.mockRestore();
+
+      const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const luna = (saved.providers[0]?.modelsCache?.models ?? []).find(m => m.id === 'gpt-6-luna');
+      expect(luna?.contextWindow).toBe(272_000);
+      expect(luna?.maxContextWindow).toBe(872_000);
+    });
+
     // Scope guard for the default above. Tier 2 is the general ChatGPT catalog — the
     // web model picker — which carries plainly non-reasoning models, so the
     // "only agentic models" premise that justifies the default does not hold there.

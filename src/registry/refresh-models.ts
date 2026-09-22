@@ -192,9 +192,12 @@ function buildDynamicOAuthModel(
   const prefix = id.split('-')[0] ?? id;
   // The gpt-6 id rule and the cache's OpenAI cap describe the API-key route (922,000
   // input); the Codex backend serves gpt-6 a smaller window. A gpt-6 id the catalog
-  // lists without one takes its seeded sibling's catalog window instead.
+  // lists without one takes the smallest seeded sibling's catalog window instead, so
+  // the answer never depends on seed order.
   const familySeed = entry.context_window === undefined && GPT6_ID.test(id)
-    ? [...seedById.values()].find(model => GPT6_ID.test(model.id))
+    ? [...seedById.values()]
+      .filter(model => GPT6_ID.test(model.id) && model.contextWindow !== undefined)
+      .sort((a, b) => (a.contextWindow as number) - (b.contextWindow as number))[0]
     : undefined;
   return {
     id,
