@@ -655,7 +655,7 @@ guilty and were neither.
   `estimateAnthropicInputTokens` on both translation paths and retains it at `finish`; the client's
   usage merge is last-non-zero-wins and yields the assistant event once.
 
-## The quota manager is one per process and has no model identity (verified 2.1.273, darwin-arm64)
+## The quota manager is one per process and has no model identity (verified 2.1.273; re-stamped 2.1.280, darwin-arm64)
 
 The usage-limit banner ("You've used 98% of your weekly limit · resets …") comes from
 `anthropic-ratelimit-unified-*` on **successful Messages responses**. There is no model field anywhere
@@ -667,6 +667,16 @@ handler in the streaming loop, for both the main turn and background calls. `gvt
 unless `anthropic-ratelimit-unified-status` or `-overage-status` is present, so a response carrying
 neither is inert.
 
+In 2.1.280 that gate is gone. Every successful response, streaming or not, reaches
+`extractQuotaStatusFromHeaders`, and `RSe` reads a missing status as `allowed`. A response with no
+quota headers and one carrying only `anthropic-ratelimit-unified-status: allowed` are processed
+identically. The status line's `rate_limits` (`Hj` → `rawUtilization`) goes empty on either one.
+
+**The warning is a one-shot toast.** The `rate-limit-warning` notification fires when the text from
+`JZn(claudeAiLimits)` changes (the percentage or the reset time), then fades within seconds. The
+last text is remembered, so the same warning does not fire twice. A warning that is gone on the next
+turn says nothing about whether the manager still holds it.
+
 **What actually raises the banner.** `allowed_warning` is normalized to `allowed` on ingest
 (`Qe.status = r === "allowed_warning" ? "allowed" : r`). The signal is the per-window
 `-surpassed-threshold`, or `utilization` plus elapsed time against `rRs` (5h: 0.90 with ≤72% of the
@@ -677,10 +687,29 @@ window elapsed; 7d: 0.75/0.60, 0.50/0.35, or 0.25/0.15). `tRs` renders `You've u
 **A stripped reading is not inert — the held window keeps it alive.** `recordSeenWindows` stores each
 window with an `observedAtMs`, and `currentWindows` re-derives from `lastSeenWindows` for anything
 observed within `sRs = 30 minutes`. `deriveTrackedLimits` runs that re-derivation (`xar`, the
-`tengu_sharded_moonbeam` flag) even when the current response carried no quota headers. So a Go
-session that receives the Claude plan's numbers once keeps showing the Claude banner for up to 30
-minutes after those headers stop arriving. Replacing the headers with an inert `allowed` status is an
-observation that retires the warning; deleting them is not.
+`tengu_sharded_moonbeam` flag, default on) even when the current response carried no quota headers.
+So a session that receives the Claude plan's numbers once keeps holding the Claude warning for up to
+30 minutes after those headers stop arriving.
+
+**An inert `allowed` does not retire a held window either (measured 2.1.280, 2026-09-23).** An
+earlier version of this section said it did; that was never observed on a real client, and it is
+wrong. Held windows are only cleared by `retireWindows`: an account switch, a limit-reset grant, a
+model switch (for `seven_day_overage_included` only), or a fresh reading for that same window, which
+overwrites it. Measured on the real TUI against a fake Anthropic server, with a fake OAuth token (an
+API-key login never shows the toast), and turn 1 answering with a session 94% and weekly 80%
+warning:
+
+| Turn 2 | Turn 3 (fresh session reading at 10%, no weekly headers) |
+| --- | --- |
+| none | toast "You've used 80% of your weekly limit" |
+| no quota headers | toast "You've used 80% of your weekly limit" |
+| only `status: allowed` | toast "You've used 80% of your weekly limit" |
+
+The held weekly window survived turn 2 in every case and surfaced as soon as the fresher session
+reading stopped hiding it. So a provider with no windows of its own can keep the Claude plan's
+*fresh* readings away from the client, but cannot take back a warning the client already holds.
+A provider with windows (OpenCode Go) does retire it, because its readings overwrite the same
+windows.
 
 **Background calls carry the same session id as the main turn.** Claude Code's title generation and
 side queries reach the proxy as passthrough requests with `x-claude-code-request-class: auxiliary`

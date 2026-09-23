@@ -77,8 +77,14 @@ reading per process and no model identity, and Claude Code's own background call
 passthrough traffic, so those responses would hand it the Claude plan's numbers while Go is in use.
 `src/http-proxy/server.ts` tracks the selected model per `x-claude-code-session-id`
 (`src/opencode-go-session.ts`) and, on that passthrough path only, replaces the Claude readings with
-Go's own (`src/anthropic-quota-header-filter.ts`). Go's translated replies are unchanged, and every
-other session is untouched.
+Go's own (`src/anthropic-quota-header-filter.ts`). Go's translated replies are unchanged.
+
+A session whose selected model is on an OpenAI API key (`providerId: 'openai'`, `authType: 'api'`)
+gets the same treatment, except that OpenAI has no usage window to put in Claude's place: the
+Claude readings are replaced with only `anthropic-ratelimit-unified-status: allowed`. That stops the
+Claude plan's fresh readings from reaching the client, but it cannot erase a Claude warning the
+client already holds from before clodex saw the first routed request (see the quota-manager section
+of `claude-code-internals.md`). ChatGPT-login sessions and every other session are untouched.
 
 Every inference and count_tokens request builds a client-disconnect controller (`watchClientDisconnect`
 in `src/http-utils.ts`, shared with `src/proxy.ts`) and passes its signal to the upstream call — the
