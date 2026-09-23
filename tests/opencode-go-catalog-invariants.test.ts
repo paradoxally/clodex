@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,26 +80,32 @@ describe('opencode-go catalog invariants', () => {
     }
   });
 
-  it('keeps prototype names unmapped while regenerating every reviewed model', () => {
-    const mappedIds = [
-      'deepseek-v4-flash', 'deepseek-v4.1-flash', 'deepseek-v4-pro', 'glm-5.1', 'glm-5.2', 'gpt-5.6-luna',
-      'hy3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k3', 'mimo-v2.5', 'mimo-v2.5-pro',
-      'minimax-m2.7', 'minimax-m3', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor', 'qwen3.6-plus', 'qwen3.7-max', 'qwen3.7-plus',
-      'qwen3.8-max',
-    ];
-    const hostileNames = ['constructor', 'toString', '__proto__', 'hasOwnProperty'];
-    const effortValues = {
-      'deepseek-v4-flash': ['high', 'max'],
-      'deepseek-v4-pro': ['high', 'max'],
-      'glm-5.2': ['high', 'max'],
-      'gpt-5.6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-      hy3: ['none', 'low', 'high'],
-      'kimi-k3': ['max'],
-    };
-    const feedModels = Object.fromEntries([
+  const mappedIds = [
+    'deepseek-v4-flash', 'deepseek-v4.1-flash', 'deepseek-v4-pro', 'glm-5.1', 'glm-5.2', 'gpt-5.6-luna',
+    'hy3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k3', 'mimo-v2.5', 'mimo-v2.5-pro',
+    'minimax-m2.7', 'minimax-m3', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor', 'qwen3.6-plus', 'qwen3.7-max', 'qwen3.7-plus',
+    'qwen3.8-max',
+  ];
+  const hostileNames = ['constructor', 'toString', '__proto__', 'hasOwnProperty'];
+  const effortValues = {
+    'deepseek-v4-flash': ['high', 'max'],
+    'deepseek-v4-pro': ['high', 'max'],
+    'glm-5.2': ['high', 'max'],
+    'gpt-5.6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+    hy3: ['none', 'low', 'high'],
+    'kimi-k3': ['max'],
+  };
+  // The two ids whose models.dev entry states an input limit below its total.
+  const limits: Record<string, { context: number; input?: number }> = {
+    'gpt-5.6-luna': { context: 1_050_000, input: 922_000 },
+    hy3: { context: 256_000, input: 192_000 },
+  };
+
+  function fixtureFeed(): Record<string, Record<string, unknown>> {
+    return Object.fromEntries([
       ...mappedIds.map(id => [id, {
         name: `Fixture ${id}`,
-        limit: { context: 128_000 },
+        limit: limits[id] ?? { context: 128_000 },
         cost: { input: 0.1, output: 0.2 },
         modalities: { input: ['text'] },
         reasoning: false,
@@ -115,6 +121,9 @@ describe('opencode-go catalog invariants', () => {
         reasoning: false,
       }]),
     ]);
+  }
+
+  function runUpdater(feedModels: Record<string, Record<string, unknown>>) {
     const feed = { 'opencode-go': { models: feedModels } };
     const workspace = mkdtempSync(join(tmpdir(), 'clodex-opencode-go-updater-'));
     const updaterPath = fileURLToPath(new URL('../scripts/update-opencode-go-models.mjs', import.meta.url));
@@ -136,30 +145,55 @@ describe('opencode-go catalog invariants', () => {
         encoding: 'utf8',
         env: { ...process.env, CLODEX_TEST_FEED: JSON.stringify(feed) },
       });
-
-      expect(result.error).toBeUndefined();
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain('not transport-mapped');
-      for (const hostileName of hostileNames) {
-        expect(result.stdout).toContain(hostileName);
-      }
-      const regenerated = JSON.parse(
-        readFileSync(join(workspace, 'src', 'data', 'opencode-go-models.json'), 'utf8'),
-      ) as Array<{ id: string; npm: string; apiUrl: string; modelFormat: string }>;
-      expect(regenerated.map(model => model.id).sort()).toEqual([...mappedIds].sort());
-      // The generator, not a hand edit, decides each entry's transport.
-      const committed = new Map(models.map(model => [model.id, model]));
-      for (const model of regenerated) {
-        const { npm, apiUrl, modelFormat } = committed.get(model.id)!;
-        expect({ npm: model.npm, apiUrl: model.apiUrl, modelFormat: model.modelFormat }, model.id)
-          .toEqual({ npm, apiUrl, modelFormat });
-      }
-      expect(regenerated.find(model => model.id === 'gpt-5.6-luna')?.npm).toBe('@ai-sdk/openai');
-      for (const hostileName of hostileNames) {
-        expect(regenerated.some(model => model.id === hostileName)).toBe(false);
-      }
+      const outPath = join(workspace, 'src', 'data', 'opencode-go-models.json');
+      const regenerated = existsSync(outPath)
+        ? JSON.parse(readFileSync(outPath, 'utf8')) as Array<{
+          id: string; npm: string; apiUrl: string; modelFormat: string; contextWindow: number;
+        }>
+        : undefined;
+      return { result, regenerated };
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
+  }
+
+  it('keeps prototype names unmapped while regenerating every reviewed model', () => {
+    const { result, regenerated } = runUpdater(fixtureFeed());
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('not transport-mapped');
+    for (const hostileName of hostileNames) {
+      expect(result.stdout).toContain(hostileName);
+    }
+    expect(regenerated!.map(model => model.id).sort()).toEqual([...mappedIds].sort());
+    // The generator, not a hand edit, decides each entry's transport.
+    const committed = new Map(models.map(model => [model.id, model]));
+    for (const model of regenerated!) {
+      const { npm, apiUrl, modelFormat } = committed.get(model.id)!;
+      expect({ npm: model.npm, apiUrl: model.apiUrl, modelFormat: model.modelFormat }, model.id)
+        .toEqual({ npm, apiUrl, modelFormat });
+    }
+    expect(regenerated!.find(model => model.id === 'gpt-5.6-luna')?.npm).toBe('@ai-sdk/openai');
+    for (const hostileName of hostileNames) {
+      expect(regenerated!.some(model => model.id === hostileName)).toBe(false);
+    }
+  });
+
+  it('takes Luna\'s window from the input limit and every other model\'s from the total', () => {
+    const { result, regenerated } = runUpdater(fixtureFeed());
+    expect(result.status, result.stderr).toBe(0);
+    const windows = new Map(regenerated!.map(model => [model.id, model.contextWindow]));
+    expect(windows.get('gpt-5.6-luna')).toBe(922_000);
+    expect(windows.get('hy3')).toBe(256_000);
+    expect(windows.get('glm-5.1')).toBe(128_000);
+  });
+
+  it('writes nothing when the feed stops stating Luna\'s input limit', () => {
+    const feed = fixtureFeed();
+    feed['gpt-5.6-luna'] = { ...feed['gpt-5.6-luna'], limit: { context: 1_050_000 } };
+    const { result, regenerated } = runUpdater(feed);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('gpt-5.6-luna: contextWindow=undefined');
+    expect(regenerated).toBeUndefined();
   });
 });
