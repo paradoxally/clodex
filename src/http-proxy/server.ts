@@ -24,13 +24,17 @@ import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.j
 import { isOpenCodeGoModel } from '../data/opencode-go-models.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
-import { replaceClaudeQuotaHeaders } from '../anthropic-quota-header-filter.js';
+import { NO_USAGE_WINDOW_HEADERS, replaceClaudeQuotaHeaders } from '../anthropic-quota-header-filter.js';
 import {
   getOpenCodeGoLimitHeaders,
   hasOpenCodeGoWindowReading,
   refreshOpenCodeGoUsage,
 } from '../opencode-go-usage.js';
-import { recordSessionModel, sessionUsesOpenCodeGo } from '../opencode-go-session.js';
+import {
+  recordSessionModel,
+  sessionRoutedUsage,
+  type RoutedUsageSource,
+} from '../opencode-go-session.js';
 import { isOpenAiOAuthRoute, oauthServiceTier } from '../sdk-adapter.js';
 import {
   getLatestMessagePreview,
@@ -228,6 +232,22 @@ export interface HttpProxyHandle {
   close: () => Promise<void>;
 }
 
+/**
+ * Which routed providers take the Claude plan's usage readings off a session.
+ * ChatGPT-login (`openai-oauth`) and every other provider are left out: none of
+ * them has been checked for a usage source of its own.
+ */
+function routedUsageSource(route: ProxyRoute | undefined): RoutedUsageSource | undefined {
+  if (!route) return undefined;
+  if (isOpenCodeGoModel({
+    providerId: route.providerId,
+    apiBaseUrl: route.baseURL,
+    baseUrl: route.upstreamUrl,
+  })) return 'opencode-go';
+  if (route.providerId === 'openai' && route.authType !== 'oauth') return 'none';
+  return undefined;
+}
+
 function authorityParts(authority: string): { host: string; port: number } | null {
   try {
     const parsed = new URL(`http://${authority}`);
@@ -265,7 +285,7 @@ function copyResponse(
   res: http.ServerResponse,
   onErrorResponse?: (statusCode: number, body: string) => void,
   onResponseUsage?: (usage: ResponseUsage) => void,
-  transformHeaders?: (rawHeaders: string[]) => string[],
+  transformHeaders?: (rawHeaders: string[], statusCode: number) => string[],
 ): void {
   const statusCode = upstream.statusCode ?? 502;
   const contentType = upstream.headers['content-type'];
@@ -299,7 +319,7 @@ function copyResponse(
   res.writeHead(
     statusCode,
     upstream.statusMessage,
-    transformHeaders ? transformHeaders(upstream.rawHeaders) : upstream.rawHeaders,
+    transformHeaders ? transformHeaders(upstream.rawHeaders, statusCode) : upstream.rawHeaders,
   );
   upstream.once('error', err => {
     logErrorResponse(` [stream error: ${err.message}]`);
@@ -341,7 +361,7 @@ function forwardRawAnthropicRequest(
    * served by OpenCode Go must not receive the Claude plan's quota readings: Claude
    * Code's quota manager has no model identity and its own background calls land here.
    */
-  transformResponseHeaders?: (rawHeaders: string[]) => string[],
+  transformResponseHeaders?: (rawHeaders: string[], statusCode: number) => string[],
 ): Promise<void> {
   return new Promise(resolve => {
     const startedAt = Date.now();
@@ -1052,11 +1072,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const requestClassRaw = req.headers['x-claude-code-request-class'];
       recordSessionModel({
         sessionId: claudeSessionId,
-        routedToOpenCodeGo: Boolean(route && isOpenCodeGoModel({
-          providerId: route.providerId,
-          apiBaseUrl: route.baseURL,
-          baseUrl: route.upstreamUrl,
-        })),
+        routedUsage: routedUsageSource(route),
         requestClass: Array.isArray(requestClassRaw) ? requestClassRaw[0] : requestClassRaw,
       });
       // Claude Code's quota manager has no model identity, so while a Go model is
@@ -1072,14 +1088,24 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       // Substituting that would blank the banner instead of correcting it, so the
       // substitution needs a real window reading; until one arrives the upstream's
       // own readings stand, which is the pre-fix behaviour and the safe direction.
+      //
+      // A session on a provider with no usage window (an OpenAI API key) gets no
+      // reading in place of Claude's, only the inert status. That keeps Claude's
+      // fresh readings away from the client but cannot erase a Claude window it
+      // already holds from before clodex saw the first routed request. Only
+      // successful responses are rewritten: turning a Claude `rejected` 429 into
+      // `allowed` would drop the reset time the client's error path shows.
+      const sessionUsage = sessionRoutedUsage(claudeSessionId);
       const goQuotaHeaders = openCodeGoApiKey
         ? getOpenCodeGoLimitHeaders(openCodeGoApiKey, goUsageLog)
         : undefined;
-      const goQuotaForSession = sessionUsesOpenCodeGo(claudeSessionId)
-        && goQuotaHeaders
-        && hasOpenCodeGoWindowReading(goQuotaHeaders)
-        ? (rawHeaders: string[]) => replaceClaudeQuotaHeaders(rawHeaders, goQuotaHeaders)
-        : undefined;
+      const quotaForSession = sessionUsage === 'none'
+        ? (rawHeaders: string[], statusCode: number) => statusCode < 300
+          ? replaceClaudeQuotaHeaders(rawHeaders, NO_USAGE_WINDOW_HEADERS)
+          : rawHeaders
+        : sessionUsage === 'opencode-go' && goQuotaHeaders && hasOpenCodeGoWindowReading(goQuotaHeaders)
+          ? (rawHeaders: string[]) => replaceClaudeQuotaHeaders(rawHeaders, goQuotaHeaders)
+          : undefined;
       const unresolvedRoutedModel = !route && requestedModel !== undefined && (
         normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)
         || reservedModelIds.has(normalizeRouteLookupId(requestedModel))
@@ -1203,7 +1229,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
             }
           : undefined,
         () => shuttingDown,
-        goQuotaForSession,
+        quotaForSession,
       );
       return;
     }

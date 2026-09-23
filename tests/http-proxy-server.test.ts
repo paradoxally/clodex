@@ -2870,6 +2870,8 @@ describe('selective HTTP proxy', () => {
       model?: string;
       /** Answer without Claude's own quota headers, as some upstream responses do. */
       withoutClaudeQuotaHeaders?: boolean;
+      /** Answer as a Claude-plan rejection instead of a success. */
+      rejected?: boolean;
     }): Promise<{ response: string; headers: Record<string, string> }> {
       const certificates = ensureHttpProxyCertificates();
       let sentHeaders: Record<string, string> = {};
@@ -2886,8 +2888,9 @@ describe('selective HTTP proxy', () => {
             headers['anthropic-ratelimit-unified-7d-utilization'] = '0.98';
             headers['anthropic-ratelimit-unified-7d-surpassed-threshold'] = '0.75';
           }
+          if (options.rejected) headers['anthropic-ratelimit-unified-status'] = 'rejected';
           headers['x-clodex-unrelated'] = 'kept';
-          res.writeHead(200, { 'Content-Type': 'application/json', ...headers });
+          res.writeHead(options.rejected ? 429 : 200, { 'Content-Type': 'application/json', ...headers });
           res.end('{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}');
         });
       });
@@ -3099,6 +3102,195 @@ describe('selective HTTP proxy', () => {
       });
       expect(claudeSide.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
       expect(claudeSide.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+    }, 30_000);
+
+    const openAiApiKeyRoute = {
+      aliasId: 'clodex:openai:gpt-6-luna',
+      realModelId: 'gpt-6-luna',
+      displayName: 'GPT-6 Luna (OpenAI)',
+      upstreamUrl: 'https://api.openai.com/v1',
+      baseURL: 'https://api.openai.com/v1',
+      apiKey: 'sk-test',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai',
+      providerId: 'openai',
+      authType: 'api' as const,
+    };
+    const goRouteForOpenAiTests = {
+      aliasId: 'clodex:opencode-go:deepseek-v4.1-flash[1m]',
+      realModelId: 'deepseek-v4.1-flash',
+      displayName: 'DeepSeek V4.1 Flash (OpenCode Go)',
+      upstreamUrl: 'https://opencode.ai/zen/go/v1',
+      apiKey: 'go-key',
+      modelFormat: 'anthropic' as const,
+      providerId: 'opencode-go',
+    };
+    const CLAUDE_WINDOW_HEADERS = [
+      'anthropic-ratelimit-unified-7d-status',
+      'anthropic-ratelimit-unified-7d-utilization',
+      'anthropic-ratelimit-unified-7d-reset',
+      'anthropic-ratelimit-unified-7d-surpassed-threshold',
+      'anthropic-ratelimit-unified-representative-claim',
+      'anthropic-ratelimit-unified-reset',
+    ];
+
+    it('gives an OpenAI API-key session no Claude reading, and hands it back on /model to Claude', async () => {
+      // Go has a reading over its own threshold here, so a session wrongly treated
+      // as Go would show Go's 84% instead of nothing.
+      process.env['CLODEX_TEST_OPENCODE_GO_USAGE'] = GO_USAGE_OVER_THRESHOLD;
+      resetOpenCodeGoUsageCacheForTests();
+      resetOpenCodeGoSessionStateForTests();
+      const routes = [goRouteForOpenAiTests, openAiApiKeyRoute];
+      const openAiSession = '00000000-0000-4000-8000-00000000001a';
+
+      await passthroughHeaders({
+        logName: 'quota-openai-turn.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'main',
+        model: openAiApiKeyRoute.aliasId,
+      });
+
+      const side = await passthroughHeaders({
+        logName: 'quota-openai-side.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'auxiliary',
+      });
+      expect(side.response).toContain('200 OK');
+      expect(side.headers['anthropic-ratelimit-unified-status']).toBe('allowed');
+      for (const name of CLAUDE_WINDOW_HEADERS) expect(side.headers[name]).toBeUndefined();
+      expect(side.headers['x-clodex-unrelated']).toBe('kept');
+      expect(side.headers['content-type']).toContain('application/json');
+
+      const bare = await passthroughHeaders({
+        logName: 'quota-openai-bare.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'auxiliary',
+        withoutClaudeQuotaHeaders: true,
+      });
+      expect(bare.headers['anthropic-ratelimit-unified-status']).toBe('allowed');
+      for (const name of CLAUDE_WINDOW_HEADERS) expect(bare.headers[name]).toBeUndefined();
+
+      // Back on Claude: that turn and every later side call carry Claude's numbers.
+      const revertTurn = await passthroughHeaders({
+        logName: 'quota-openai-revert-turn.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'main',
+        model: 'claude-opus-5',
+      });
+      expect(revertTurn.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+      expect(revertTurn.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+      const afterRevert = await passthroughHeaders({
+        logName: 'quota-openai-after-revert.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'auxiliary',
+      });
+      expect(afterRevert.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+      expect(afterRevert.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.98');
+    }, 30_000);
+
+    it('keeps an auxiliary call from undoing the OpenAI session, and leaves other sessions alone', async () => {
+      process.env['CLODEX_TEST_OPENCODE_GO_USAGE'] = GO_USAGE_OVER_THRESHOLD;
+      resetOpenCodeGoUsageCacheForTests();
+      resetOpenCodeGoSessionStateForTests();
+      const oauthRoute = {
+        ...openAiApiKeyRoute,
+        aliasId: 'clodex:openai-oauth:gpt-6-luna',
+        displayName: 'GPT-6 Luna (ChatGPT)',
+        providerId: 'openai-oauth',
+        authType: 'oauth' as const,
+      };
+      const routes = [goRouteForOpenAiTests, openAiApiKeyRoute, oauthRoute];
+      const openAiSession = '00000000-0000-4000-8000-00000000001b';
+      const oauthSession = '00000000-0000-4000-8000-00000000001c';
+      const claudeSession = '00000000-0000-4000-8000-00000000001d';
+
+      await passthroughHeaders({
+        logName: 'quota-openai-turn-2.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'main',
+        model: openAiApiKeyRoute.aliasId,
+      });
+      // A Haiku side query is Claude traffic but not a model switch, so the session
+      // is still on OpenAI when the next one arrives.
+      await passthroughHeaders({
+        logName: 'quota-openai-haiku-side.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'auxiliary',
+        model: 'claude-haiku-4-5-20251001',
+      });
+      const stillOpenAi = await passthroughHeaders({
+        logName: 'quota-openai-still.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'auxiliary',
+      });
+      expect(stillOpenAi.headers['anthropic-ratelimit-unified-status']).toBe('allowed');
+      for (const name of CLAUDE_WINDOW_HEADERS) expect(stillOpenAi.headers[name]).toBeUndefined();
+
+      // A Claude-plan rejection is an error, not a reading: it keeps its own
+      // status and reset so the client can say when the limit lifts.
+      const rejected = await passthroughHeaders({
+        logName: 'quota-openai-rejected.jsonl',
+        routes,
+        claudeSessionId: openAiSession,
+        requestClass: 'auxiliary',
+        rejected: true,
+      });
+      expect(rejected.response).toContain('429');
+      expect(rejected.headers['anthropic-ratelimit-unified-status']).toBe('rejected');
+      expect(rejected.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.98');
+
+      // A provider written before `authType` existed is an API key too.
+      const legacyRoute = { ...openAiApiKeyRoute, authType: undefined };
+      const legacySession = '00000000-0000-4000-8000-00000000001e';
+      await passthroughHeaders({
+        logName: 'quota-legacy-turn.jsonl',
+        routes: [legacyRoute],
+        claudeSessionId: legacySession,
+        requestClass: 'main',
+        model: legacyRoute.aliasId,
+      });
+      const legacySide = await passthroughHeaders({
+        logName: 'quota-legacy-side.jsonl',
+        routes: [legacyRoute],
+        claudeSessionId: legacySession,
+        requestClass: 'auxiliary',
+      });
+      expect(legacySide.headers['anthropic-ratelimit-unified-status']).toBe('allowed');
+      expect(legacySide.headers['anthropic-ratelimit-unified-7d-utilization']).toBeUndefined();
+
+      // ChatGPT login is out of scope: its session keeps the upstream readings.
+      await passthroughHeaders({
+        logName: 'quota-oauth-turn.jsonl',
+        routes,
+        claudeSessionId: oauthSession,
+        requestClass: 'main',
+        model: oauthRoute.aliasId,
+      });
+      const oauthSide = await passthroughHeaders({
+        logName: 'quota-oauth-side.jsonl',
+        routes,
+        claudeSessionId: oauthSession,
+        requestClass: 'auxiliary',
+      });
+      expect(oauthSide.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.98');
+      expect(oauthSide.headers['anthropic-ratelimit-unified-7d-surpassed-threshold']).toBe('0.75');
+
+      const claudeSide = await passthroughHeaders({
+        logName: 'quota-claude-only-side.jsonl',
+        routes,
+        claudeSessionId: claudeSession,
+        requestClass: 'auxiliary',
+      });
+      expect(claudeSide.headers['anthropic-ratelimit-unified-status']).toBe('allowed_warning');
+      expect(claudeSide.headers['anthropic-ratelimit-unified-7d-utilization']).toBe('0.98');
     }, 30_000);
   });
 
