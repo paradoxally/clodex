@@ -71,7 +71,8 @@ const TRANSPORTS = Object.assign(Object.create(null), {
 // Luna answers 200 at 915,013 input tokens and context_length_exceeded at
 // 930,000, consistent with the feed's 922,000. An id listed here whose feed entry
 // loses `limit.input` fails ingest validation instead of falling back to the
-// total.
+// total. Only ids measured against Go belong here: `hy3` also lists an input
+// limit (192,000 of 256,000) and keeps its total until it is measured.
 const INPUT_CAPPED = new Set(['gpt-5.6-luna']);
 
 // Clodex-side compatibility behavior per model, validated against the live
