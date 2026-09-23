@@ -64,6 +64,17 @@ const TRANSPORTS = Object.assign(Object.create(null), {
   'qwen3.8-max': 'anthropic-messages',
 });
 
+// Ids whose window is models.dev's `limit.input` rather than `limit.context`
+// (input + output). Claude Code fills the window it is told with input and
+// compacts ~33K below it, so a total above an enforced input cap lets a session
+// cross the cap before it compacts. Measured on Go's /v1/responses 2026-09-23:
+// Luna answers 200 at 915,013 input tokens and context_length_exceeded at
+// 930,000, consistent with the feed's 922,000. An id listed here whose feed entry
+// loses `limit.input` fails ingest validation instead of falling back to the
+// total. Only ids measured against Go belong here: `hy3` also lists an input
+// limit (192,000 of 256,000) and keeps its total until it is measured.
+const INPUT_CAPPED = new Set(['gpt-5.6-luna']);
+
 // Clodex-side compatibility behavior per model, validated against the live
 // endpoint. It travels with the transport map rather than being read from the
 // feed, so a hostile or wrong feed cannot change what clodex puts on the wire.
@@ -352,7 +363,7 @@ function toClodexModel(id, devModel) {
   return {
     id,
     name: devModel.name ?? id,
-    contextWindow: devModel.limit?.context,
+    contextWindow: INPUT_CAPPED.has(id) ? devModel.limit?.input : devModel.limit?.context,
     cost,
     modelFormat: anthropic ? 'anthropic' : 'openai',
     npm: anthropic ? '@ai-sdk/anthropic' : openAiNpm,

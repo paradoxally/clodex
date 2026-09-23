@@ -216,6 +216,12 @@ describe('OpenCode Go gpt-5.6-luna catalog entry', () => {
       },
     });
   });
+
+  it('reports the input Go accepts as the window, not input plus output', () => {
+    // Measured on Go's /v1/responses 2026-09-23: 915,013 input tokens answer 200,
+    // 930,000 answer context_length_exceeded. models.dev lists 1,050,000 in total.
+    expect(lunaCatalogEntry().contextWindow).toBe(922_000);
+  });
 });
 
 describe('an installed OpenCode Go provider exposes Luna on the Responses route', () => {
@@ -271,6 +277,29 @@ describe('an installed OpenCode Go provider exposes Luna on the Responses route'
       });
     });
   }
+
+  it('reports the catalog window over a 1,050,000 saved before the cap', () => {
+    const registry: ProviderRegistry = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+        modelsCache: {
+          fetchedAt: '2026-09-16T00:00:00.000Z',
+          models: [{ ...staleCachedLuna, npm: '@ai-sdk/openai', contextWindow: 1_050_000 }],
+        },
+        addedAt: '2026-09-11T00:00:00.000Z',
+      }],
+    };
+
+    const [provider] = materializeRegistry(registry, () => 'go-key');
+    expect(provider?.models.find(model => model.id === LUNA)?.contextWindow).toBe(922_000);
+  });
 });
 
 describe('an OpenCode Go Luna turn on the wire', () => {
