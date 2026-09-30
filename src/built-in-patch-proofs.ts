@@ -39,14 +39,15 @@ function captureNeedle(
   source: string,
   name: string,
   needle: string,
+  expected = 1,
 ): BuiltInPatchProof {
-  if (countExactOccurrences(source, needle) !== 1) {
+  if (countExactOccurrences(source, needle) !== expected) {
     throw new Error(`clodex patch: could not capture built-in postcondition: ${name}`);
   }
   return {
     name,
     protectedText: needle,
-    occurrences: 1,
+    occurrences: expected,
   };
 }
 
@@ -132,15 +133,27 @@ export function captureBuiltInPatchProofs(
       ));
     }
   }
-  if (protectsResult(results, 'PATCH 5: model picker options')) {
+  // Both picker sites emit the SAME row literal — PATCH 5 into the legacy builder, PATCH 11 into
+  // the entry point the served-catalog builder returns through — so the row is proof of however
+  // many of them applied, and pinning it at one occurrence would fail the moment both do.
+  const pickerSites = [
+    'PATCH 5: model picker options',
+    'PATCH 11: catalog picker options',
+  ].filter(name => protectsResult(results, name));
+  if (pickerSites.length > 0) {
     for (const { alias, id, entry } of aliases) {
       proofs.push(captureNeedle(
         source,
-        `PATCH 5: model picker options (${alias})`,
+        `model picker options (${alias})`,
         modelPickerOption(alias, id, entry),
+        pickerSites.length,
       ));
     }
   }
+  addPattern(
+    'PATCH 11: catalog picker options',
+    /,_ccpick=\/\*ccpatch:picker\*\/\[[\s\S]*?\]\.forEach\(function\(_o\)\{if\(![\w$]+\.some\(function\(_i\)\{return _i\.value===_o\.value\}\)\)[\w$]+\.push\(_o\)\}\)/,
+  );
 
   addPattern(
     'PATCH 7: per-model context window',
@@ -162,16 +175,16 @@ export function captureBuiltInPatchProofs(
     'PATCH 9: default effort',
     /\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
   );
-  // PATCH 11's marker sits at the head of the function it rewrites, so it cannot
+  // PATCH F1's marker sits at the head of the function it rewrites, so it cannot
   // be the proof — the point of a proof is to say what the patch ADDED. The record
   // literal is that: a local patch could drop `startedAt` and leave the marker
   // standing.
   addPattern(
-    'PATCH 11: hook banner start time',
+    'PATCH F1: hook banner start time',
     /\{hookEvent:[\w$]+,hooks:[\w$]+,settled:new Set,agentId:[\w$]+,startedAt:Date\.now\(\)\};/,
   );
   addPattern(
-    'PATCH 12: hook banner delay',
+    'PATCH F2: hook banner delay',
     // Tolerant of what sits between the comparison and the return, so adding the
     // statusMessage exemption did not silently stop this proof matching — which
     // would have made every local patch report "could not capture built-in

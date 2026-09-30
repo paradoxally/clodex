@@ -44,6 +44,7 @@ import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sha256File } from '../src/patch-backup.js';
+import { HOOK_BANNER_ANCHORS } from './fixtures/claude-bundle.js';
 import { readPatchManifest } from '../src/patch-manifest.js';
 import { runPatchCommand } from '../src/patcher.js';
 import { CSC_ARGS, findCsc, runCsc } from '../src/vscode-launcher.js';
@@ -84,6 +85,7 @@ const PATCHABLE_BUNDLE = [
   'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
   'function ait(e){return ww(lo(e))?.default_effort??"high"}',
   'function cwdOf(){let p=process.env.PWD;return p}',
+  ...HOOK_BANNER_ANCHORS,
   'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
 ].join('\n');
 

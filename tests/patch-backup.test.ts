@@ -296,7 +296,7 @@ describe('isPatchedClaudeSource', () => {
     'function ait(e){return ww(lo(e))?.default_effort??"high"}',
     'function cwdOf(){let p=process.env.PWD;return p}',
     'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
-    // PATCH 11 and 12 are required and unconditional, so this fixture needs them
+    // PATCH F1 and F2 are required and unconditional, so this fixture needs them
     // for the same reason it needs the effort sites — and sharing the strings
     // keeps a fifth hand-written copy from drifting.
     ...HOOK_BANNER_ANCHORS,

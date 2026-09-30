@@ -7,7 +7,7 @@ export const OPENCODE_GO_PROVIDER_NAME = 'OpenCode Go';
 export const OPENCODE_GO_COMPLETIONS_BASE_URL = 'https://opencode.ai/zen/go/v1';
 export const OPENCODE_GO_ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 export const OPENCODE_GO_SOURCE = 'https://models.dev/api.json';
-export const OPENCODE_GO_SOURCE_FETCHED_AT = '2026-09-16T21:03:59.152Z';
+export const OPENCODE_GO_SOURCE_FETCHED_AT = '2026-09-29T18:10:26.407Z';
 
 type OpenCodeGoModel = Pick<CachedModel, 'id' | 'name'>
   & Partial<Omit<CachedModel, 'id' | 'name'>>;
@@ -15,13 +15,12 @@ type OpenCodeGoModel = Pick<CachedModel, 'id' | 'name'>
 /**
  * Curated OpenCode Go models supported by Clodex.
  *
- * Metadata (name, context, cost, modalities) comes from OpenCode's own
- * catalog (models.dev); per-model wire transport and compatibility behavior
- * are clodex's live-validated knowledge in the updater script. The upstream
+ * Metadata (name, context, base cost, modalities) comes from OpenCode's own
+ * catalog (models.dev); per-model wire transport, pricing boundaries, and
+ * compatibility behavior are maintained in clodex's updater. The upstream
  * catalog mixes Anthropic Messages, Chat Completions, and Responses
- * transports. A Responses entry enters the provider allowlist only once its
- * wire behaviour is verified against the live endpoint (gpt-5.6-luna); the
- * rest (currently Grok and mainline GPT) stay out.
+ * transports. Clodex publishes only models with a verified transport;
+ * unmapped models never enter the provider allowlist.
  */
 export function buildOpenCodeGoModels(): OpenCodeGoModel[] {
   return structuredClone(models) as unknown as OpenCodeGoModel[];

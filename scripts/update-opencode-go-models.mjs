@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 //
 //   Feed-controlled: name, contextWindow, cost, modalities, reasoning.
 //   Local-only:      apiUrl, npm, modelFormat, the whole compatibility block,
-//                    and which ids exist at all (TRANSPORTS below).
+//                    pricing boundaries, and which ids exist at all (TRANSPORTS below).
 //
 // `toClodexModel` hardcodes every routing constant locally and filters ids
 // against TRANSPORTS, so a hostile or simply wrong feed cannot produce a bad
@@ -34,17 +34,21 @@ const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 // mapped here. A new model on models.dev surfaces in the updater's "unmapped"
 // report and is added once its transport is verified against the live
 // endpoint. Responses-only models ride 'openai-responses' (the @ai-sdk/openai
-// Responses path) only once verified; grok and mainline gpt are still absent.
+// Responses path) only once verified; grok and GPT ids other than the two
+// Lunas are still unmapped.
 const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-flash': 'openai-completions',
   // Measured 2026-09-11: V4.1 Flash answers on /v1/messages (thinking block + text).
   'deepseek-v4.1-flash': 'anthropic-messages',
   'deepseek-v4-pro': 'openai-completions',
-  'glm-5.1': 'openai-completions',
   'glm-5.2': 'openai-completions',
   // Measured 2026-09-16: /v1/chat/completions answers HTTP 500 for every
   // request, /v1/responses answers 200 — including streamed tool calls.
   'gpt-5.6-luna': 'openai-responses',
+  // Measured 2026-09-29: GPT-6 Luna answers 200 on /v1/responses with
+  // reasoning effort and 400 ModelProtocolUnsupported on /v1/chat/completions
+  // and /v1/messages; OpenCode's Go docs list it on /v1/responses.
+  'gpt-6-luna': 'openai-responses',
   'hy3': 'openai-completions',
   'kimi-k2.6': 'openai-completions',
   'kimi-k2.7-code': 'openai-completions',
@@ -86,6 +90,18 @@ const INPUT_CAPPED = new Set(['gpt-5.6-luna']);
 // entries are validated against, never as their source: `assertEffortLadders`
 // below fails this updater if a map would send an effort value the feed does
 // not publish, and reports the safe direction rather than failing on it.
+// Higher-rate pricing boundaries, curated from OpenCode Go's own pricing page.
+// models.dev also publishes context tiers (`cost.tiers`), but the updater does
+// not read them: like the rest of this block they stay local-only, and the
+// feed has disagreed with Go's page (it lists a 512K minimax-m3 tier Go does
+// not). Checked against Go's pricing page on 2026-09-29.
+const PRICING_BOUNDARIES = Object.assign(Object.create(null), {
+  'gpt-6-luna': {
+    pricingBoundary: 272_000,
+    pricingBoundaryNote: 'Above it, OpenCode Go lists $0.20 input and $0.75 output per million tokens.',
+  },
+});
+
 const PATCHES = Object.assign(Object.create(null), {
   // Muse Spark rides the @ai-sdk/openai Responses path, where effort is only
   // sent for OpenAI/Codex model families (effortProviderOptions). The model
@@ -107,15 +123,6 @@ const PATCHES = Object.assign(Object.create(null), {
     maxTokensField: 'max_tokens',
     requiresReasoningContentOnAssistantMessages: true,
     thinkingFormat: 'deepseek',
-  },
-  'glm-5.1': {
-    // Z.ai: reasoning_effort is "Only supported by GLM-5.2". 5.1 thinks by
-    // default and is controlled by the binary `thinking` field, so it reasons
-    // but has no effort control to advertise.
-    supportsReasoningEffort: false,
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
   },
   'glm-5.2': {
     // Z.ai's own API documents the full ladder ("max, xhigh, high, medium,
@@ -142,6 +149,13 @@ const PATCHES = Object.assign(Object.create(null), {
     // supportsDeveloperRole and maxTokensField only drive the Chat Completions
     // body rewrite, which the Responses transport never runs, so they are absent.
     reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+  },
+  'gpt-6-luna': {
+    // OpenCode Go serves GPT-6 Luna exclusively over the Responses API (/v1/responses).
+    // models.dev publishes effort=none/low/medium/high/xhigh/max. On @ai-sdk/openai
+    // the gpt-6 family rule, not these values, decides the effort on the wire; the
+    // map lists the menu levels and is what assertEffortLadders checks against the feed.
+    reasoningEffortMap: { none: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
   'hy3': {
     reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: null },
@@ -364,6 +378,7 @@ function toClodexModel(id, devModel) {
     id,
     name: devModel.name ?? id,
     contextWindow: INPUT_CAPPED.has(id) ? devModel.limit?.input : devModel.limit?.context,
+    ...(PRICING_BOUNDARIES[id] ?? {}),
     cost,
     modelFormat: anthropic ? 'anthropic' : 'openai',
     npm: anthropic ? '@ai-sdk/anthropic' : openAiNpm,

@@ -94,16 +94,32 @@ import {
  * `provider` joined it; the bump follows the rule that a changed replacement
  * bumps.
  *
- * 14 — PATCH 11 and PATCH 12 are new sites, and they are what stops the spinner
- * line flashing `running PreToolUse hook` for a hook that finished in 20 ms. Two
- * sites rather than one because the fix needs both ends of one data path: the
- * batch record gains a start time, and the renderer refuses to draw the banner
- * before that start time is old enough. Neither is configurable, so unlike every
- * other site these run for every install — which is also why the bump matters
- * here more than usual: without it, a user whose favorites never change keeps a
- * binary that still flashes, forever.
+ * 14 (fork) — PATCH F1 and PATCH F2 are new sites, and they are what stops the
+ * spinner line flashing `running PreToolUse hook` for a hook that finished in
+ * 20 ms. Two sites rather than one because the fix needs both ends of one data
+ * path: the batch record gains a start time, and the renderer refuses to draw the
+ * banner before that start time is old enough. Neither is configurable, so unlike
+ * every other site these run for every install — which is also why the bump
+ * matters here more than usual: without it, a user whose favorites never change
+ * keeps a binary that still flashes, forever.
+ *
+ * 14 (upstream) — PATCH 11 is new, and it is the first site added since the
+ * /model picker gained a second builder. Claude Code assembles the picker from a
+ * served model catalog when the account is served one, and only falls back to the
+ * hardcoded builder PATCH 5 patches when it is not; on a served account every row
+ * PATCH 5 injects is unreachable and /model shows no clodex model at all. Existing
+ * installs have to repatch to receive the new site, which is exactly what the
+ * bump is for.
+ *
+ * 15 — the fork's own transform set plus upstream's at 13; a number neither side
+ * had named.
+ *
+ * 16 — the fork's sites (PATCH 5's real-name rows, PATCH F1, PATCH F2) plus
+ * upstream's PATCH 11, again a set neither side had named. PATCH 11 emits the same
+ * real-name row as PATCH 5, so /model titles a clodex model by its own name on
+ * both picker paths.
  */
-export const PATCH_TRANSFORMS_VERSION = 15;
+export const PATCH_TRANSFORMS_VERSION = 16;
 
 /**
  * How long a hook must have been running before its banner is drawn on the
@@ -220,7 +236,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–10) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–11) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -499,6 +515,9 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     }
   }
 
+  /** One picker row, as both picker patches spell it: see `modelPickerOption`. */
+  const pickerRow = (a: string) => modelPickerOption(a, ALIAS_TO_ID[a]!, ENTRY_BY_ALIAS[a]!);
+
   // ---------------------------------------------------------------------------
   // PATCH 5 — interactive /model picker.
   // The picker is assembled through a single choke-point function; we insert,
@@ -555,9 +574,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // ---------------------------------------------------------------------------
   {
     const missing = ALIASES.filter((a) => !new RegExp('value:' + reEsc(q(a))).test(js));
-    const entries = missing
-      .map((a) => modelPickerOption(a, ALIAS_TO_ID[a]!, ENTRY_BY_ALIAS[a]!))
-      .join(',');
+    const entries = missing.map(pickerRow).join(',');
     /** The append snippet, bound to whatever this build named the options array. */
     const injectInto = (options: string) =>
       missing.length
@@ -578,6 +595,89 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         /\(([\w$]+)==="opus"\|\|\1==="sonnet"\)[^;{}]*\?\[\1,([\w$]+)\]:\[\2\];for\(let ([\w$]+) of [\w$]+\)[\w$]+\(([\w$]+),\3,[\w$]+\);/,
         (m, _selected, _requested, _item, options) => m + injectInto(options!),
         { required: false, noopIsSkip: true }
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 11 — the /model picker's served-catalog path.
+  // PATCH 5 above patches the LEGACY option builder. Claude Code only reaches
+  // that builder when no model catalog is served: the picker's entry point is
+  //
+  //     function Ij(e,n){let r=Cj(e,n),s=r??Rj(e),g=a.ANTHROPIC_CUSTOM_MODEL_OPTION;…}
+  //
+  // where `Cj` builds the whole list from the catalog the account is served and
+  // `Rj` — PATCH 5's builder, and the only path that reaches its choke point —
+  // is the `??` fallback. On an account that receives a catalog, `Cj` returns a
+  // non-null array, `Rj` is never called, and every row PATCH 5 injected sits in
+  // dead code: the aliases resolve, the Agent tool accepts them, `--model` works,
+  // and they are missing from /model alone. That is measured, not inferred — on
+  // Claude Code 2.1.282 with nine aliases patched OK, /model listed the served
+  // catalog's fourteen rows and none of the nine.
+  //
+  // So inject at the entry point, where both builders' results converge, and
+  // leave PATCH 5 in place for the builds and accounts that still take the
+  // legacy path (it dedupes by value, so a row reaching the array twice is not a
+  // second row). One side effect: the legacy builder's branch for Bedrock, Vertex,
+  // Foundry and Mantle never reached PATCH 5's choke point, so those pickers now
+  // list the aliases too.
+  // That adds no routing — clodex does not serve those providers — and the same
+  // names typed by hand were already accepted there.
+  //
+  // Anchor: the two-argument function whose FIRST statement binds one builder's
+  // result and then `?? `s it with the other's — `let r=C(e,n),s=r??R(e)` — with
+  // every identifier wildcarded and the repeats tied by back-reference, since
+  // that is the shape the minifier renames freely. `ANTHROPIC_CUSTOM_MODEL_OPTION`
+  // in a bounded lookahead is the discriminator: the env var by which Claude Code
+  // itself appends a non-catalog row to this very array, so it names the model
+  // picker and not any other two-builder merge. Measured against all fourteen
+  // published bundles on this machine (2.1.260 … 2.1.282) the pair matches
+  // exactly once. 2.1.270 and 2.1.272 bind a third declarator between the `??`
+  // and the env read, which is why the lookahead is bounded at 400 characters
+  // rather than requiring the env read to follow immediately.
+  //
+  // The rows are appended as one more DECLARATOR in the same `let` — a statement
+  // spliced in would land in the middle of the declaration list and not parse —
+  // and every measured build continues the list with a comma at exactly this
+  // point. The `(?=[,;])` right after the fallback call is what makes that safe
+  // to assume: a declarator can be appended before a `,` or a `;`, but a build
+  // that chains onto the fallback (`opts(e).slice()`, `opts(e)?.filter(…)`) would
+  // have the declarator split the chain, so the chained call would run on the
+  // `forEach` result instead of the array. Such a build stops matching and this
+  // site reports `anchor not found` rather than emitting code that throws or
+  // silently drops the chained call.
+  //
+  // `required:false`, like PATCH 5: a picker that lost its anchor costs the user
+  // the /model rows, not a working binary. The marker makes a re-patch idempotent
+  // — unlike PATCH 5 this site cannot use "is this value already present?",
+  // because PATCH 5 has put those very values in the source by the time it runs.
+  //
+  // For the same reason the anchor is counted against the ORIGINAL source first.
+  // PATCH 5 has spliced the user's model display names into the buffer by now, and
+  // a name that spells this anchor would otherwise be a candidate — on a build
+  // with no matching entry point (2.1.252 and older) the ONLY one, and the rows
+  // would be spliced into that name's string literal, breaking the bundle's syntax.
+  // ---------------------------------------------------------------------------
+  {
+    const catalogSite = 'PATCH 11: catalog picker options';
+    const catalogMarker = '/*ccpatch:picker*/';
+    const catalogAnchor = /function [\w$]+\(([\w$]+),([\w$]+)\)\{let ([\w$]+)=[\w$]+\(\1,\2\),([\w$]+)=\3\?\?[\w$]+\(\1\)(?=[,;])(?=[\s\S]{0,400}ANTHROPIC_CUSTOM_MODEL_OPTION)/;
+    const entryPoints = source.match(new RegExp(catalogAnchor.source, 'g'))?.length ?? 0;
+    const rows = ALIASES.map(pickerRow).join(',');
+    if (ALIASES.length === 0) {
+      log('SKIP', catalogSite, 'no aliases configured');
+    } else if (entryPoints !== 1 && !js.includes(catalogMarker)) {
+      log('FAIL', catalogSite, entryPoints === 0
+        ? 'anchor not found'
+        : 'anchor matched ' + entryPoints + ' times (expected 1)');
+    } else {
+      applyOnce(
+        catalogSite,
+        catalogAnchor,
+        (m, _first, _second, _catalog, options) =>
+          m + ',_ccpick=' + catalogMarker + '[' + rows + '].forEach(function(_o){if(!'
+          + options! + '.some(function(_i){return _i.value===_o.value}))' + options! + '.push(_o)})',
+        { marker: catalogMarker, required: false },
       );
     }
   }
@@ -781,10 +881,10 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   }
 
   // ---------------------------------------------------------------------------
-  // PATCH 11 — hook batch start time, and the tick that reveals the banner.
+  // PATCH F1 — hook batch start time, and the tick that reveals the banner.
   //
   // Claude Code draws `running PreToolUse hook` as the spinner's suffix. The
-  // suffix comes from one function (PATCH 12 below), fed by this one: a tracker
+  // suffix comes from one function (PATCH F2 below), fed by this one: a tracker
   // that publishes a record per hook batch, `{hookEvent,hooks,settled,agentId}`.
   // There is no time in that record and nowhere else on the path — the per-hook
   // `Date.now()` reads all live in the executor and are consumed only to stamp
@@ -792,7 +892,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // here, at the only writer.
   //
   // The timer is here for the same reason, and it is the whole reason this is two
-  // sites rather than one. PATCH 12's gate reads the clock, and the renderer
+  // sites rather than one. PATCH F2's gate reads the clock, and the renderer
   // memoises its selector on `(snapshot, selectorFn)`:
   //   `if(e.last!==null&&e.last.snapshot===n&&e.last.select===s)return e.last.selected`
   // so once the banner has been drawn, or declined, it is not recomputed until
@@ -819,7 +919,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // cannot satisfy that.
   // ---------------------------------------------------------------------------
   {
-    const patchName = 'PATCH 11: hook banner start time';
+    const patchName = 'PATCH F1: hook banner start time';
     const marker = '/*ccpatch:hook-banner*/';
     const delay = String(HOOK_BANNER_DELAY_MS);
     // Named capture groups, and a source joined from fragments rather than one
@@ -884,14 +984,14 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   }
 
   // ---------------------------------------------------------------------------
-  // PATCH 12 — hide the hook banner until the batch is old enough.
+  // PATCH F2 — hide the hook banner until the batch is old enough.
   //
-  // This is the gate PATCH 11's start time exists for. The function renders the
+  // This is the gate PATCH F1's start time exists for. The function renders the
   // spinner suffix, and its return value is what the reader sees flash.
   //
   // The comparison fails OPEN on purpose: a record with no `startedAt` gives
   // `NaN`, `NaN < n` is false, and the banner draws exactly as it does on an
-  // unpatched binary. That is what makes PATCH 11 safe to lose — a build whose
+  // unpatched binary. That is what makes PATCH F1 safe to lose — a build whose
   // tracker anchor drifted still shows a banner, it just shows it always. The
   // alternative, treating a missing start time as "young", would silently drop
   // the banner for every hook the moment the two sites fell out of step.
@@ -916,7 +1016,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // nothing — the body is the discriminator. Measured: 78 bytes, unique.
   // ---------------------------------------------------------------------------
   {
-    const patchName = 'PATCH 12: hook banner delay';
+    const patchName = 'PATCH F2: hook banner delay';
     const marker = '/*ccpatch:hook-banner-gate*/';
     const delay = String(HOOK_BANNER_DELAY_MS);
     if (js.includes(marker)) {

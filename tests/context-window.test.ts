@@ -48,6 +48,7 @@ describe('contextWindowFromHeuristics', () => {
     ['gpt-6-luna', 922_000],
     ['gpt-6-sol', 922_000],
     ['gpt-6-astra', 922_000],
+    ['gpt-6.1-sol', 922_000],
     ['openai/gpt-6-luna', 922_000],
     ['gpt-60-mini', DEFAULT_CONTEXT_WINDOW],
     ['gpt-4o-mini', 128_000],

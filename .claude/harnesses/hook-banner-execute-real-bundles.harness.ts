@@ -1,4 +1,4 @@
-// PATCH 11 + PATCH 12 verification harness — clodex
+// PATCH F1 + PATCH F2 verification harness — clodex
 //
 // Claim under test: the two hook-banner sites bind to the RIGHT function on a real
 // Claude Code build, and the code they emit RUNS.
@@ -42,7 +42,7 @@ describe('the emitted code RUNS on every platform build', () => {
     const source = readFileSync(path as string, 'utf8');
     const patched = checkPatchSites(source).patchedSource!;
 
-    // PATCH 11: from its marker to the end of that one function. The function is
+    // PATCH F1: from its marker to the end of that one function. The function is
     // found by BALANCING its own braces rather than by taking a line — the joined
     // bundle puts many functions on one line, so a line slice picks up whatever
     // else shares it, including `import` statements from a neighbouring module.
@@ -84,7 +84,7 @@ describe('the emitted code RUNS on every platform build', () => {
     expect(typeof state[0]!.startedAt, `${label}: startedAt is stamped`).toBe('number');
     expect(timers, `${label}: one tick at the threshold`).toEqual([500]);
 
-    // PATCH 12: from its function head to the same line's end.
+    // PATCH F2: from its function head to the same line's end.
     const gm = patched.indexOf('/*ccpatch:hook-banner-gate*/');
     const gmStart = patched.indexOf('function', gm - 400);
     const gOpen = patched.indexOf('{', gmStart);

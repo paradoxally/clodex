@@ -52,6 +52,7 @@ export const EXPECTED_PATCH_SITES = Object.freeze([
   'PATCH 3: known-alias validator list',
   'PATCH 6: alias resolver switch',
   'PATCH 5: model picker options',
+  'PATCH 11: catalog picker options',
   'PATCH 4: Agent tool model description',
   'PATCH 7: per-model context window',
   'PATCH 8a: effort capability',
@@ -61,8 +62,8 @@ export const EXPECTED_PATCH_SITES = Object.freeze([
   // These two are unconditional — nothing in PROBE_PATCH_CONFIG turns them on,
   // and nothing turns them off — so they are the pair the probe would keep
   // reporting long after a config-gated site had been dropped from the list.
-  'PATCH 11: hook banner start time',
-  'PATCH 12: hook banner delay',
+  'PATCH F1: hook banner start time',
+  'PATCH F2: hook banner delay',
   'PATCH 10: child network environment',
 ]);
 

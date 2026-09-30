@@ -33,28 +33,39 @@ export function contextResolver(modelParam: string, windowParam: string): string
 
 /**
  * The hook-batch tracker and the spinner-suffix builder, as Claude Code 2.1.273
- * minifies them. PATCH 11 rewrites the first and PATCH 12 gates the second.
+ * minifies them. PATCH F1 rewrites the first and PATCH F2 gates the second.
  *
  * Every identifier is deliberately a DIFFERENT letter from the real bundle's, so
  * a transform that spells one out instead of capturing it fails here. `Fjt`'s
- * real name is reused in two unrelated scopes in 2.1.273, which is why PATCH 12's
+ * real name is reused in two unrelated scopes in 2.1.273, which is why PATCH F2's
  * anchor carries the body rather than the name — the fixture keeps the shape that
  * makes that necessary without pretending to be the whole bundle.
  */
 export const HOOK_BANNER_ANCHORS = [
-  // PATCH 11's anchor. `agentId:b` binds to a parameter the head destructured, and
+  // PATCH F1's anchor. `agentId:b` binds to a parameter the head destructured, and
   // `settle` reaches the entry by identity — both are what identify the site.
   'function hookTrack({hookEvent:a,hooks:b,agentId:c}){let st=store(),e={hookEvent:a,hooks:b,settled:new Set,agentId:c};'
   + 'return st.setState((p)=>[...p,e]),{settle:(p)=>st.setState((q)=>{let i=q.indexOf(e);'
   + 'if(i===-1||e.settled.has(p))return q;return e={...e,settled:new Set(e.settled).add(p)},q.toSpliced(i,1,e)}),'
   + '[Symbol.dispose]:()=>st.setState((p)=>{let i=p.indexOf(e);return i===-1?p:p.toSpliced(i,1)})}}',
-  // PATCH 12's anchor. The `let ... findLast ... if(!X)return null;` run is the
+  // PATCH F2's anchor. The `let ... findLast ... if(!X)return null;` run is the
   // discriminator; `Se=""` is the dead suffix slot the real bundle also carries.
   'function hookSuffix(h){let E=h.findLast((R)=>R.agentId===void 0);if(!E)return null;'
   + 'let O=E.hooks.length,ee=O>1?`\\u2026 ${E.settled.size}/${O}`:"",ne=E.hooks.find((R,I)=>!E.settled.has(I));'
   + 'if(ne?.statusMessage)return`${ne.statusMessage}${ee||"\\u2026"}`;'
   + 'let Se="",we=Se?"hook":H(O,"hook");return`running ${E.hookEvent} ${we}${Se}${ee}`}',
 ];
+
+/**
+ * The /model picker's entry point, as Claude Code 2.1.274+ minifies it: the served catalog's
+ * builder, `??`-ed with the legacy builder PATCH 5 patches, and then the custom-model env option
+ * appended to whichever array came back. PATCH 11 keys on that pair. The legacy builder's own
+ * choke point is `opts` above — the two sites are deliberately different functions here, because
+ * that is what they are in the bundle and patching one has never patched the other.
+ */
+export const PICKER_ENTRY_POINT =
+  'function mkOpts(e,n){let r=fromCatalog(e,n),s=r??opts(e),d=env.ANTHROPIC_CUSTOM_MODEL_OPTION;'
+  + 'if(d&&!s.some((x)=>x.value===d))s.push({value:d,label:d,description:"Custom"});return s}';
 
 export const CLAUDE_CORE_FIXTURE = [
   ENUM_AND_DESCRIPTION,
@@ -65,6 +76,7 @@ export const CLAUDE_CORE_FIXTURE = [
   'function cwdOf(){let p=process.env.PWD;return p}',
   'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
   ...HOOK_BANNER_ANCHORS,
+  PICKER_ENTRY_POINT,
 ].join('\n');
 
 export const CLAUDE_FIXTURE = [

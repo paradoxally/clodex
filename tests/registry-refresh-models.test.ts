@@ -3,6 +3,7 @@ import { refreshProviderModels } from '../src/registry/refresh-models.js';
 import * as io from '../src/registry/io.js';
 import * as pricing from '../src/registry/pricing.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
+import { CODEX_RESPONSES_LITE_VERSION } from '../src/constants.js';
 
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(),
@@ -219,8 +220,11 @@ describe('registry/refresh-models', () => {
 
       const result = await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
 
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('https://chatgpt.com/backend-api/codex/models?client_version='), expect.anything());
+      // The second call re-asks the catalog at the version clodex sends; this mock
+      // leaves it unanswered, which must not affect the refresh.
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(global.fetch).toHaveBeenNthCalledWith(1, expect.stringContaining('https://chatgpt.com/backend-api/codex/models?client_version='), expect.anything());
+      expect(global.fetch).toHaveBeenNthCalledWith(2, `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_RESPONSES_LITE_VERSION}`, expect.anything());
       
       expect(result.ok).toBe(true);
       expect(result.modelCount).toBe(1);
@@ -347,7 +351,8 @@ describe('registry/refresh-models', () => {
     });
 
     // The 922,000 gpt-6 rule describes the API-key route. The Codex backend serves
-    // gpt-6 its own smaller window, so an unlisted one comes from the seeded sibling.
+    // gpt-6 its own smaller window, so an unseeded one comes from the seeded sibling.
+    // The ids must stay unseeded, or the seed path answers and this proves nothing.
     it("gives a gpt-6 id the catalog lists without a window its seeded sibling's window", async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,
@@ -366,8 +371,8 @@ describe('registry/refresh-models', () => {
         ok: true,
         json: async () => ({
           models: [
-            { slug: 'gpt-6-luna', title: 'Luna' },
-            { slug: 'gpt-6-sol', title: 'Sol', context_window: 300_000 },
+            { slug: 'gpt-6-nova', title: 'Nova' },
+            { slug: 'gpt-6-terra', title: 'Terra', context_window: 300_000 },
             { slug: 'gpt-5.9-test', title: 'Five' },
           ],
         }),
@@ -377,10 +382,10 @@ describe('registry/refresh-models', () => {
 
       const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
       const byId = new Map((saved.providers[0]?.modelsCache?.models ?? []).map(m => [m.id, m]));
-      expect(byId.get('gpt-6-luna')?.contextWindow).toBe(272_000);
-      expect(byId.get('gpt-6-luna')?.maxContextWindow).toBe(872_000);
-      expect(byId.get('gpt-6-sol')?.contextWindow).toBe(300_000);
-      expect(byId.get('gpt-6-sol')?.maxContextWindow).toBeUndefined();
+      expect(byId.get('gpt-6-nova')?.contextWindow).toBe(272_000);
+      expect(byId.get('gpt-6-nova')?.maxContextWindow).toBe(872_000);
+      expect(byId.get('gpt-6-terra')?.contextWindow).toBe(300_000);
+      expect(byId.get('gpt-6-terra')?.maxContextWindow).toBeUndefined();
       expect(byId.get('gpt-5.9-test')?.contextWindow).toBe(1_000_000);
     });
 
@@ -578,7 +583,7 @@ describe('registry/refresh-models', () => {
       expect(mockRegistry.providers[0]?.modelsCache?.models[0]?.id).toBe('cached-model');
     });
 
-    it('captures use_responses_lite / prefer_websockets flags from the live Codex endpoint', async () => {
+    it('keeps live capability flags authoritative even if the catalog changes to false', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,
         providers: [{
@@ -598,7 +603,8 @@ describe('registry/refresh-models', () => {
         json: async () => ({
           models: [
             { slug: 'gpt-5.6-luna', title: 'GPT-5.6 Luna', context_window: 272_000, use_responses_lite: true, prefer_websockets: true },
-            { slug: 'gpt-5.6-sol', title: 'GPT-5.6 Sol', context_window: 272_000 },
+            { slug: 'gpt-5.6-sol', title: 'GPT-5.6 Sol', context_window: 272_000,
+              use_responses_lite: false, prefer_websockets: false },
           ],
         }),
       } as Response);
@@ -613,9 +619,9 @@ describe('registry/refresh-models', () => {
       expect(luna?.preferWebSockets).toBe(true);
       expect(luna?.contextWindow).toBe(272_000);
       expect(sol?.contextWindow).toBe(272_000);
-      // A model the backend does not flag stays on the HTTP path.
-      expect(sol?.useResponsesLite).toBeUndefined();
-      expect(sol?.preferWebSockets).toBeUndefined();
+      // A live catalog answer overrides the seed even when the answer is false.
+      expect(sol?.useResponsesLite).toBe(false);
+      expect(sol?.preferWebSockets).toBe(false);
     });
 
     // A catalog that omits the ceiling is not one reporting there is none. Treating
@@ -728,11 +734,13 @@ describe('registry/refresh-models', () => {
       expect(luna?.useResponsesLite).toBe(true);
       expect(luna?.preferWebSockets).toBe(true);
 
-      // The same guarantee for the newer families. useResponsesLite is what decides
-      // whether the pinned Codex client version is sent at all, and without that
-      // header gpt-6-astra is refused outright — so a seed that loses the flag
-      // silently disconnects the model from the fix that makes it work.
-      for (const id of ['gpt-6-astra', 'gpt-daybreak-blue-latest']) {
+      // useResponsesLite decides whether the pinned Codex client version is sent at
+      // all. A stale seed silently drops the headers the catalog asks for (gpt-6-astra
+      // is refused outright without them).
+      for (const id of [
+        'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest',
+        'gpt-5.6-sol', 'gpt-5.6-terra',
+      ]) {
         const model = savedRegistry.providers[0]?.modelsCache?.models.find(m => m.id === id);
         expect(model, `${id} missing from the seed`).toBeDefined();
         expect(model?.useResponsesLite, id).toBe(true);

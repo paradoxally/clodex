@@ -25,7 +25,7 @@ const SESSION_ID = '7d0f4a52-1c2b-4e8a-9b6f-3c5d2e1f0a9b';
 const LUNA = 'gpt-5.6-luna';
 // Upstream's Muse Spark contributors joined Luna on the Responses path. Naming the
 // set keeps the fleet check below from going vacuous as it grows.
-const GO_RESPONSES_MODELS = [LUNA, 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor'];
+const GO_RESPONSES_MODELS = [LUNA, 'gpt-6-luna', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor'];
 const GO_CIPHERTEXT = 'go-encrypted-reasoning';
 
 function lunaCatalogEntry() {
