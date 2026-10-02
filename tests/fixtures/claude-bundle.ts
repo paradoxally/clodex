@@ -57,6 +57,25 @@ export const HOOK_BANNER_ANCHORS = [
 ];
 
 /**
+ * The same two sites as Claude Code 2.1.287 minifies them. The tracker's record
+ * gains `toolName`, and the suffix builder no longer finds its own batch: two
+ * selectors do the `findLast` (the second skips one tool's batches) and hand the
+ * batch to a shared builder. The three sit on one line, as in the real bundle.
+ */
+export const HOOK_BANNER_ANCHORS_TOOL_NAME = [
+  'function hookTrack({hookEvent:a,hooks:b,agentId:c,toolName:d}){let st=store(),e={hookEvent:a,hooks:b,settled:new Set,agentId:c,toolName:d};'
+  + 'return st.setState((p)=>[...p,e]),{settle:(p)=>st.setState((q)=>{let i=q.indexOf(e);'
+  + 'if(i===-1||e.settled.has(p))return q;return e={...e,settled:new Set(e.settled).add(p)},q.toSpliced(i,1,e)}),'
+  + '[Symbol.dispose]:()=>st.setState((p)=>{let i=p.indexOf(e);return i===-1?p:p.toSpliced(i,1)})}}',
+  'function hookSuffix(h){return hookLabel(h.findLast((R)=>R.agentId===void 0))}'
+  + 'function hookSuffixTool(h){return hookLabel(h.findLast((R)=>R.agentId===void 0&&R.toolName!==PL))}'
+  + 'function hookLabel(E){if(!E)return null;'
+  + 'let O=E.hooks.length,ee=O>1?`\\u2026 ${E.settled.size}/${O}`:"",ne=E.hooks.find((R,I)=>!E.settled.has(I));'
+  + 'if(ne?.statusMessage)return`${ne.statusMessage}${ee||"\\u2026"}`;'
+  + 'let Se="",we=Se?"hook":H(O,"hook");return`running ${E.hookEvent} ${we}${Se}${ee}`}',
+];
+
+/**
  * The /model picker's entry point, as Claude Code 2.1.274+ minifies it: the served catalog's
  * builder, `??`-ed with the legacy builder PATCH 5 patches, and then the custom-model env option
  * appended to whichever array came back. PATCH 11 keys on that pair. The legacy builder's own
@@ -86,6 +105,11 @@ export const CLAUDE_FIXTURE = [
   'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
   'function ait(e){return ww(lo(e))?.default_effort??"high"}',
 ].join('\n');
+
+export const CLAUDE_FIXTURE_TOOL_NAME = CLAUDE_FIXTURE.replace(
+  HOOK_BANNER_ANCHORS.join('\n'),
+  HOOK_BANNER_ANCHORS_TOOL_NAME.join('\n'),
+);
 
 export const CLAUDE_PROXY_EFFORT_FIXTURE = [
   CLAUDE_CORE_FIXTURE,
