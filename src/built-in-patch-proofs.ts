@@ -181,7 +181,7 @@ export function captureBuiltInPatchProofs(
   // standing.
   addPattern(
     'PATCH F1: hook banner start time',
-    /\{hookEvent:[\w$]+,hooks:[\w$]+,settled:new Set,agentId:[\w$]+,startedAt:Date\.now\(\)\};/,
+    /\{hookEvent:[\w$]+,hooks:[\w$]+,settled:new Set,agentId:[\w$]+(?:,toolName:[\w$]+)?,startedAt:Date\.now\(\)\};/,
   );
   addPattern(
     'PATCH F2: hook banner delay',

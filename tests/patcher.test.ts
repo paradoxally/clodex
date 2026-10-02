@@ -4,6 +4,7 @@ import { BUNDLE_MODULE_SEPARATOR } from '../src/bun-bundle.js';
 import {
   CLAUDE_CORE_FIXTURE,
   CLAUDE_FIXTURE,
+  CLAUDE_FIXTURE_TOOL_NAME,
   CLAUDE_PROXY_EFFORT_FIXTURE,
   CLAUDE_SPLIT_ENTRY_ID,
   CLAUDE_SPLIT_MODULES,
@@ -759,8 +760,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 16,
-      digest: 'dbc9b06eec330f80c82e943f6f0cac64b3f2d113f3889fa9fa6c130d1a185d20',
+      version: 17,
+      digest: 'b261ac13b2b1b17bee134af0bc859d60f8ecf1e56ee8374dc021b3f5ac676355',
     });
   });
 });
@@ -3670,7 +3671,8 @@ describe('patch script identity naming', () => {
   // the first cut of this site emitted a record literal that never carried
   // `startedAt` at all while every string assertion still passed.
   // ---------------------------------------------------------------------------
-  describe('hook banner delay', () => {
+  /** Runs the patched hook-banner sites of one fixture shape. */
+  function hookBanner(source: string) {
     /** The emitted declaration of one patched function, taken from its own line. */
     function emitted(patched: string, name: string): string {
       const line = patched.split('\n').find(row => row.includes(`function ${name}(`));
@@ -3680,7 +3682,7 @@ describe('patch script identity naming', () => {
 
     /** The patched tracker, run against a stub store and a captured timer. */
     function tracker() {
-      const patched = runPatchScript(config);
+      const patched = runPatchScript(config, source);
       const declaration = emitted(patched, 'hookTrack');
       let state: Array<Record<string, unknown>> = [];
       const timers: number[] = [];
@@ -3705,7 +3707,7 @@ describe('patch script identity naming', () => {
         store: () => unknown,
         setTimeout: (cb: () => void, ms: number) => number,
         clearTimeout: (id: number) => void,
-      ) => (o: { hookEvent: string; hooks: unknown[]; agentId?: string }) => {
+      ) => (o: { hookEvent: string; hooks: unknown[]; agentId?: string; toolName?: string }) => {
         settle: (hook: unknown) => void;
         [Symbol.dispose]: () => void;
       };
@@ -3718,16 +3720,25 @@ describe('patch script identity naming', () => {
       return { track, store, timers, cleared, getState: () => state };
     }
 
-    /** The patched suffix builder, run against a record with a chosen start time. */
-    function suffix() {
-      const patched = runPatchScript(config);
-      const declaration = emitted(patched, 'hookSuffix');
-      const body = declaration.slice(declaration.indexOf('{') + 1, declaration.lastIndexOf('}'));
-      const build = new Function('H', `return function(h){${body}};`) as (
+    /** The patched suffix selector, run against a record with a chosen start time. */
+    function suffix(name = 'hookSuffix') {
+      const patched = runPatchScript(config, source);
+      const declaration = emitted(patched, name);
+      const build = new Function('H', 'PL', `${declaration}; return ${name};`) as (
         H: (n: number, s: string) => string,
+        PL: string,
       ) => (h: unknown[]) => string | null;
-      return build((n, singular) => (n === 1 ? singular : singular + 's'));
+      return build((n, singular) => (n === 1 ? singular : singular + 's'), 'Poll');
     }
+
+    return { tracker, suffix };
+  }
+
+  describe.each([
+    { shape: '2.1.273 (record without toolName, builder finds its own batch)', source: CLAUDE_FIXTURE },
+    { shape: '2.1.287 (record with toolName, builder shared by two selectors)', source: CLAUDE_FIXTURE_TOOL_NAME },
+  ])('hook banner delay on $shape', ({ source }) => {
+    const { tracker, suffix } = hookBanner(source);
 
     const record = (startedAt: number | undefined) => [{
       agentId: undefined,
@@ -3842,21 +3853,69 @@ describe('patch script identity naming', () => {
     });
 
     it('names the failure when either anchor drifts, and refuses to publish', () => {
-      const trackerDrift = CLAUDE_FIXTURE.replace(
-        'let st=store(),e={hookEvent:a,hooks:b,settled:new Set,agentId:c}',
-        'let st=store(),e={hookEvent:a,hooks:b,settled:new Set,agentId:c,extra:1}',
+      const trackerDrift = source.replace(
+        'e={hookEvent:a,hooks:b,settled:new Set,agentId:c',
+        'e={hookEvent:a,hooks:b,settled:new Set,extra:1,agentId:c',
       );
-      expect(trackerDrift).not.toBe(CLAUDE_FIXTURE);
+      expect(trackerDrift).not.toBe(source);
       expect(() => applyClodexPatches(trackerDrift, config))
         .toThrow(/PATCH F1: hook banner start time/);
 
-      const suffixDrift = CLAUDE_FIXTURE.replace(
-        'function hookSuffix(h){let E=h.findLast',
-        'function hookSuffix(h){let E=h.slice().findLast',
-      );
-      expect(suffixDrift).not.toBe(CLAUDE_FIXTURE);
+      // Each shape drifts at the statement its own anchor keys on: the
+      // 2.1.287 anchor never reads `findLast`, so breaking that would prove nothing.
+      const suffixDrift = source.includes('function hookLabel(')
+        ? source.replace('let O=E.hooks.length', 'let O=E.hooks.slice().length')
+        : source.replace('function hookSuffix(h){let E=h.findLast', 'function hookSuffix(h){let E=h.slice().findLast');
+      expect(suffixDrift).not.toBe(source);
       expect(() => applyClodexPatches(suffixDrift, config))
         .toThrow(/PATCH F2: hook banner delay/);
+    });
+  });
+
+  describe('hook banner delay on the 2.1.287 toolName record', () => {
+    const { tracker, suffix } = hookBanner(CLAUDE_FIXTURE_TOOL_NAME);
+
+    it('keeps toolName in the record it writes back, through a settle', () => {
+      const { track, getState } = tracker();
+      const handle = track({ hookEvent: 'PreToolUse', hooks: [{ command: 'x' }], toolName: 'Bash' });
+      expect(getState()[0]).toMatchObject({ toolName: 'Bash', startedAt: expect.any(Number) });
+
+      handle.settle(0);
+
+      expect(getState()[0]).toMatchObject({ toolName: 'Bash', startedAt: expect.any(Number) });
+    });
+
+    it('gates both selectors, including the one that skips a tool\'s batches', () => {
+      const batch = (ago: number, toolName = 'Bash') => [{
+        agentId: undefined,
+        toolName,
+        hooks: [{ command: 'x' }],
+        settled: new Set<number>(),
+        hookEvent: 'PreToolUse',
+        startedAt: Date.now() - ago,
+      }];
+      for (const render of [suffix('hookSuffix'), suffix('hookSuffixTool')]) {
+        expect(render(batch(10))).toBeNull();
+        expect(render(batch(5_000))).toBe('running PreToolUse hook');
+      }
+      expect(suffix('hookSuffixTool')(batch(5_000, 'Poll'))).toBeNull();
+    });
+
+    it('refuses a record whose toolName is not the name the parameter destructured', () => {
+      const swapped = CLAUDE_FIXTURE_TOOL_NAME.replace('agentId:c,toolName:d};', 'agentId:c,toolName:a};');
+      expect(swapped).not.toBe(CLAUDE_FIXTURE_TOOL_NAME);
+      expect(() => applyClodexPatches(swapped, config))
+        .toThrow(/PATCH F1: hook banner start time/);
+    });
+
+    it('re-patches its own output unchanged, and the built-in proofs still capture', () => {
+      const once = applyClodexPatches(CLAUDE_FIXTURE_TOOL_NAME, config);
+      expect(() => captureBuiltInPatchProofs(once.content, config, once.results)).not.toThrow();
+
+      const twice = applyClodexPatches(once.content, config);
+
+      expect(twice.content).toBe(once.content);
+      expect(() => captureBuiltInPatchProofs(twice.content, config, twice.results)).not.toThrow();
     });
   });
 

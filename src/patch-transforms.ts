@@ -118,8 +118,13 @@ import {
  * upstream's PATCH 11, again a set neither side had named. PATCH 11 emits the same
  * real-name row as PATCH 5, so /model titles a clodex model by its own name on
  * both picker paths.
+ *
+ * 17 — PATCH F1 and PATCH F2 also match Claude Code 2.1.287, where the batch
+ * record gained `toolName` and the suffix builder's `findLast` moved out into two
+ * selectors. Output on older builds is unchanged; the bump follows the rule that
+ * a changed anchor bumps.
  */
-export const PATCH_TRANSFORMS_VERSION = 16;
+export const PATCH_TRANSFORMS_VERSION = 17;
 
 /**
  * How long a hook must have been running before its banner is drawn on the
@@ -885,7 +890,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   //
   // Claude Code draws `running PreToolUse hook` as the spinner's suffix. The
   // suffix comes from one function (PATCH F2 below), fed by this one: a tracker
-  // that publishes a record per hook batch, `{hookEvent,hooks,settled,agentId}`.
+  // that publishes a record per hook batch, `{hookEvent,hooks,settled,agentId}`
+  // (plus `toolName` from 2.1.287, which the rewrite keeps).
   // There is no time in that record and nowhere else on the path — the per-hook
   // `Date.now()` reads all live in the executor and are consumed only to stamp
   // `durationMs` on an ALREADY-FINISHED hook. So the start time has to be added
@@ -914,9 +920,9 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // itself is the whole factory, so it can only match a function of that exact
   // shape; and the record literal inside it is counted across the whole bundle
   // first, because "matched once" says one candidate survived, not that it was
-  // the right one. The record's own identity is that `hookEvent`, `hooks` and
-  // `agentId` all read names the parameter DESTRUCTURED — a bare object literal
-  // cannot satisfy that.
+  // the right one. The record's own identity is that `hookEvent`, `hooks`,
+  // `agentId` and any `toolName` all read names the parameter DESTRUCTURED — a
+  // bare object literal cannot satisfy that.
   // ---------------------------------------------------------------------------
   {
     const patchName = 'PATCH F1: hook banner start time';
@@ -931,8 +937,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     // numeric escape is a second trap in the same place, because `'\6'` in a
     // plain string is an octal escape, not a back-reference to group six.
     const anchor = new RegExp([
-      '(?<head>function [\\w$]+\\(\\{hookEvent:(?<event>[\\w$]+),hooks:(?<hooks>[\\w$]+),agentId:(?<agent>[\\w$]+)\\}\\)\\{let )',
-      '(?<decl>(?<store>[\\w$]+)=(?<factory>[\\w$]+)\\(\\),(?<entry>[\\w$]+)=\\{hookEvent:\\k<event>,hooks:\\k<hooks>,settled:new Set,agentId:\\k<agent>\\};)',
+      '(?<head>function [\\w$]+\\(\\{hookEvent:(?<event>[\\w$]+),hooks:(?<hooks>[\\w$]+),agentId:(?<agent>[\\w$]+)(?:,toolName:(?<tool>[\\w$]+))?\\}\\)\\{let )',
+      '(?<decl>(?<store>[\\w$]+)=(?<factory>[\\w$]+)\\(\\),(?<entry>[\\w$]+)=\\{hookEvent:\\k<event>,hooks:\\k<hooks>,settled:new Set,agentId:\\k<agent>(?<toolField>,toolName:\\k<tool>)?\\};)',
       '(?<publish>return \\k<store>\\.setState\\(\\((?<prev>[\\w$]+)\\)=>\\[\\.\\.\\.\\k<prev>,\\k<entry>\\]\\),)',
       '(?<settle>\\{settle:\\((?<settled>[\\w$]+)\\)=>\\k<store>\\.setState\\(\\((?<mutate>[\\w$]+)\\)=>\\{let (?<at>[\\w$]+)=\\k<mutate>\\.indexOf\\(\\k<entry>\\);)',
       '(?<guard>if\\(\\k<at>===-1\\|\\|\\k<entry>\\.settled\\.has\\(\\k<settled>\\)\\)return \\k<mutate>;)',
@@ -952,7 +958,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     // unpatched spelling made a second `clodex patch` refuse the binary the first
     // one had just produced.
     const recordLiterals = source.match(
-      /hookEvent:[\w$]+,hooks:[\w$]+,settled:new Set,agentId:[\w$]+(?:,startedAt:Date\.now\(\))?\};/g,
+      /hookEvent:[\w$]+,hooks:[\w$]+,settled:new Set,agentId:[\w$]+(?:,toolName:[\w$]+)?(?:,startedAt:Date\.now\(\))?\};/g,
     ) ?? [];
     if (recordLiterals.length !== 1) {
       log('FAIL', patchName, 'hook batch record appears ' + recordLiterals.length + ' times (expected 1)');
@@ -970,7 +976,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           // `settle`'s `{...<entry>,...}` spread carries it for free.
           + '_ccHookBannerTimer,' + g.store + '=' + g.factory + '(),'
           + g.entry + '={hookEvent:' + g.event + ',hooks:' + g.hooks + ',settled:new Set,agentId:'
-          + g.agent + ',startedAt:Date.now()};'
+          + g.agent + (g.toolField ?? '') + ',startedAt:Date.now()};'
           + g.publish
           + '_ccHookBannerTimer=setTimeout(()=>' + g.store + '.setState(' + g.prev
           + '=>' + g.prev + '.slice()),' + delay + '),'
@@ -1019,6 +1025,18 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     const patchName = 'PATCH F2: hook banner delay';
     const marker = '/*ccpatch:hook-banner-gate*/';
     const delay = String(HOOK_BANNER_DELAY_MS);
+    // Two shapes of the same builder. Up to 2.1.285 it finds its own batch with
+    // `findLast` and guards the result; from 2.1.287 two selectors do the
+    // `findLast` (one also skips a tool's batches) and pass the batch to a
+    // shared builder that opens on the guard. Gating that shared builder covers
+    // both selectors. Its guard alone is too common a shape to identify it, so
+    // the anchor also requires the `hooks.length` statement that follows — as a
+    // lookahead, so the replacement still depends only on the guard.
+    const shapes = [
+      /(?<head>function [\w$]+\((?<arg>[\w$]+)\)\{let (?<entry>[\w$]+)=\k<arg>\.findLast\(\((?<item>[\w$]+)\)=>\k<item>\.agentId===void 0\);if\(!\k<entry>\)return null;)/,
+      /(?<head>function [\w$]+\((?<entry>[\w$]+)\)\{if\(!\k<entry>\)return null;)(?=let (?<count>[\w$]+)=\k<entry>\.hooks\.length,[\w$]+=\k<count>>1\?)/,
+    ];
+    let anchor = shapes[0]!;
     if (js.includes(marker)) {
       log('SKIP', patchName, 'already patched');
     } else {
@@ -1032,20 +1050,19 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       // crafted as this minified function would make it ambiguous and abort the
       // patch. That is the same boundary PATCH 10 has, it fails in the loud
       // direction, and reaching it means pasting Claude Code's own minified source
-      // into a model label — so it is left as-is rather than buying a lookahead that
-      // would make the anchor depend on the statement BELOW it.
-      const anchors = source.match(
-        /function (?:[\w$]+)\((?<arg>[\w$]+)\)\{let (?<entry>[\w$]+)=\k<arg>\.findLast\(\((?<item>[\w$]+)\)=>\k<item>\.agentId===void 0\);if\(!\k<entry>\)return null;/g,
-      ) ?? [];
-      if (anchors.length !== 1) {
-        log('FAIL', patchName, 'hook banner builder appears ' + anchors.length + ' times (expected 1)');
+      // into a model label — so it is left as-is.
+      const counts = shapes.map(shape => source.match(new RegExp(shape.source, 'g'))?.length ?? 0);
+      const total = counts.reduce((sum, n) => sum + n, 0);
+      if (total !== 1) {
+        log('FAIL', patchName, 'hook banner builder appears ' + total + ' times (expected 1)');
         fail('clodex patch: required patch failed: ' + patchName);
       }
+      anchor = shapes[counts.indexOf(1)]!;
     }
     if (!js.includes(marker)) {
       applyOnce(
         patchName,
-        /(?<head>function [\w$]+\((?<arg>[\w$]+)\)\{let (?<entry>[\w$]+)=\k<arg>\.findLast\(\((?<item>[\w$]+)\)=>\k<item>\.agentId===void 0\);if\(!\k<entry>\)return null;)/,
+        anchor,
         (_match, ...rest) => {
           const g = rest[rest.length - 1] as unknown as Record<string, unknown>;
           const entry = g.entry as string;
