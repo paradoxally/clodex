@@ -78,8 +78,9 @@ function configuredAliases(config: PatchScriptModelConfig): Array<{
   const aliases = new Map<string, { id: string; entry: PatchScriptModelEntry }>();
   for (const [id, entry] of Object.entries(config)) {
     if (entry.alias === undefined) continue;
-    const alias = String(entry.alias).trim().toLowerCase();
-    aliases.set(alias, { id, entry });
+    for (const name of [entry.alias, ...(entry.moreAliases ?? [])]) {
+      aliases.set(String(name).trim().toLowerCase(), { id, entry });
+    }
   }
   return [...aliases].map(([alias, value]) => ({ alias, ...value }));
 }

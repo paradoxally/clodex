@@ -494,12 +494,17 @@ relocates the Bun section and strands its old copy; that is independent of the r
   real users. Weigh added specificity against that, prefer anchors that fail loud over anchors that
   fail silent, and let the canary — which now runs the real patch sites on Linux and the host —
   catch the loud ones.
-- **The alias IS the model identity in the binary.** For any favorite with an alias, the short name
-  (`sol`) — never the canonical `clodex:<provider>:<model>` id — is what lands in the Agent-tool zod
-  enum (PATCH 1), the known-alias validator list (PATCH 3), the `/model` picker value (PATCH 5 in the
-  legacy builder, PATCH 11 at the entry point the served-catalog builder returns through), and the
+- **The alias IS the model identity in the binary.** For any favorite with aliases, each saved short
+  name (`sol`) — never the canonical `clodex:<provider>:<model>` id — is what lands in the Agent-tool
+  zod enum (PATCH 1), the known-alias validator list (PATCH 3), the `/model` picker value (PATCH 5 in
+  the legacy builder, PATCH 11 at the entry point the served-catalog builder returns through), and the
   context-window map (PATCH 7). Subagent/skill/agent `model:` frontmatter is validated against
   that same enum, so injecting canonical ids made `model: sol` fail with InputValidationError.
+  A model saved under several aliases (a follow-latest `sol` and a pin `sol61`) is patched under
+  every one of them, each with the same window and effort and its own `/model` row (labelled with
+  its own name, sharing the model's description): `buildPatchModelConfig` makes the first saved
+  alias the entry's `alias` and puts the rest in `moreAliases`. Keying those by target
+  in a `Map` once kept only the last, and the others silently fell back to the 200K default.
   Favorites with no alias fall back to their canonical id as the identity (enum + validator +
   context map only; no resolver case, no picker entry).
 - **PATCH 6 (alias resolver switch) maps each alias to ITSELF.** The case must exist — the switch's
@@ -530,12 +535,14 @@ relocates the Bun section and strands its old copy; that is independent of the r
   credentials).
 - `computePatchConfigHash` = sha256 of `[PATCH_TRANSFORMS_VERSION, key-sorted [key, alias??null,
   context??null, display??null, effort-levels??null, default-effort??null, name??null,
-  provider??null] array]`, plus the versioned local-module content identity only while local
-  patches are enabled. Disabled users
-  retain the exact historical hash shape. The manifest at `~/.clodex/patch-state.json` (binary path,
-  claude version, config hash, patched size/sha256, backup path, pristine sha256 — the last absent
-  in pre-content-addressed manifests) drives `evaluatePatchState` →
-  `unpatched | current | stale-config | stale-binary`.
+  provider??null] array]`, with an entry's `moreAliases` array appended to its tuple as a ninth
+  element only when the entry has one — so a config with one alias per model keeps its earlier
+  hash, while giving a model a second alias changes the hash and marks the patch stale. The
+  versioned local-module content identity is appended only while local patches are enabled;
+  disabled users retain the exact historical hash shape. The manifest at
+  `~/.clodex/patch-state.json` (binary path, claude version, config hash, patched size/sha256,
+  backup path, pristine sha256 — the last absent in pre-content-addressed manifests) drives
+  `evaluatePatchState` → `unpatched | current | stale-config | stale-binary`.
 - **PATCH 10 isolates proxy-mode bridge settings from standard child commands.**
   `computeWrapperEnv()` and `buildHttpProxyChildEnv()` write `CLAUDE_CODE_CLODEX_NETWORK_ENV`, a
   versioned compare-before-revert contract holding the external and injected values for the proxy
