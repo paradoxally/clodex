@@ -760,8 +760,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 17,
-      digest: 'b261ac13b2b1b17bee134af0bc859d60f8ecf1e56ee8374dc021b3f5ac676355',
+      version: 18,
+      digest: 'fa4bc67c9cae6f10a048fe6536d440d5d2da0130ce3a7004c054935d9b9f416f',
     });
   });
 });
@@ -4175,5 +4175,144 @@ describe('patch script identity naming', () => {
       'clodex:openai-oauth:gpt-5.6-sol[1m]',
       'medium',
     )).toBe('medium');
+  });
+});
+
+describe('several saved aliases naming one model', () => {
+  const aliases = [
+    { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' },
+    { name: 'sol61', providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' },
+  ];
+  const favorites = [{ providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' }];
+  const meta = () => ({ contextWindow: 872_000 });
+
+  it('keeps every alias, the first saved one as the primary', () => {
+    const { config } = buildPatchModelConfig(favorites, aliases, meta);
+    expect(config['clodex:openai-oauth:gpt-6.1-sol']).toEqual({
+      alias: 'sol',
+      moreAliases: ['sol61'],
+      context: 872_000,
+    });
+  });
+
+  it('gives each alias the context window and resolution, not only the last one', () => {
+    const { config } = buildPatchModelConfig(favorites, aliases, meta);
+    const out = applyClodexPatches(CLAUDE_FIXTURE, config).content;
+    expect(out).toContain('"sol":872000');
+    expect(out).toContain('"sol61":872000');
+    expect(out).toContain('case"sol":return "sol";');
+    expect(out).toContain('case"sol61":return "sol61";');
+  });
+
+  it('leaves the config hash of a one-alias-per-model config unchanged', () => {
+    const single = { 'clodex:openai-oauth:gpt-6.1-sol': { alias: 'sol', context: 872_000 } };
+    const withEmpty = { 'clodex:openai-oauth:gpt-6.1-sol': { alias: 'sol', context: 872_000, moreAliases: undefined } };
+    expect(computePatchConfigHash(withEmpty)).toBe(computePatchConfigHash(single));
+    const multi = buildPatchModelConfig(favorites, aliases, meta).config;
+    expect(computePatchConfigHash(multi)).not.toBe(computePatchConfigHash(single));
+  });
+
+  // Each table below is fed by its own loop over a model's aliases, so each can drop the second
+  // alias on its own while the context window and resolver above stay intact. These run the
+  // patched functions for every alias rather than reading the emitted text.
+  describe('every table the patch writes', () => {
+    const SOL_LABEL = 'GPT-6.1 Sol (OpenAI (ChatGPT))';
+    const PLAIN_LABEL = 'Plain (OpenAI)';
+    // A reasoning model and a model without effort controls, each saved under two names.
+    const twoModels = [
+      { providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' },
+      { providerId: 'openai', modelId: 'plain' },
+    ];
+    const fourAliases = [
+      { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' },
+      { name: 'sol61', providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' },
+      { name: 'plain', providerId: 'openai', modelId: 'plain' },
+      { name: 'plain2', providerId: 'openai', modelId: 'plain' },
+    ];
+    const config = () => buildPatchModelConfig(twoModels, fourAliases, (_provider, model) => (
+      model === 'gpt-6.1-sol'
+        ? {
+            contextWindow: 872_000,
+            displayName: SOL_LABEL,
+            effort: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultLevel: 'medium' },
+          }
+        : { contextWindow: 128_000, displayName: PLAIN_LABEL }
+    )).config;
+
+    /** The values the patched Agent-tool `model` enum is built from, by running its expression. */
+    function agentToolModels(source: string): string[] {
+      const line = source.split('\n').find(candidate => candidate.startsWith('.enum('));
+      expect(line).toBeDefined();
+      let values: string[] = [];
+      const schema = { optional: () => schema, describe: () => schema };
+      Function('z', 'hint', `return z${line};`)(
+        { enum: (members: string[]) => { values = members; return schema; } },
+        () => false,
+      );
+      return values;
+    }
+
+    /** The patched known-model list, by running its declaration. */
+    function knownModels(source: string): string[] {
+      const line = source.split('\n').find(candidate => candidate.startsWith('var KNOWN='));
+      expect(line).toBeDefined();
+      return Function(`${line};return KNOWN;`)() as string[];
+    }
+
+    it('gives every alias its model\'s effort levels and default, with or without [1m]', () => {
+      const out = runPatchScript(config(), CLAUDE_PROXY_EFFORT_FIXTURE);
+      for (const name of ['sol', 'sol61', 'sol[1m]', 'sol61[1m]']) {
+        // A native answer of false, so only the baked verdict can say true.
+        expect(
+          CAPABILITY_GATES.map(({ functionName }) => executeCapability(out, functionName, name, false)),
+          name,
+        ).toEqual([true, true, true]);
+        // A native default that disagrees, so only the baked default answers high.
+        expect(executeDefaultEffort(out, name, 'medium'), name).toBe('high');
+      }
+      // A model without effort controls is still a configured model under every name: the native
+      // answer of true must not leak through for its second alias either.
+      for (const name of ['plain', 'plain2', 'plain2[1m]']) {
+        expect(
+          CAPABILITY_GATES.map(({ functionName }) => executeCapability(out, functionName, name, true)),
+          name,
+        ).toEqual([false, false, false]);
+        expect(executeDefaultEffort(out, name, 'medium'), name).toBe('medium');
+      }
+      // Under-scope: a name nobody saved still gets the native answer.
+      expect(executeCapability(out, 'OI', 'unconfigured', true)).toBe(true);
+    });
+
+    it('accepts every alias as an Agent-tool model and a known model, and describes each', () => {
+      const out = runPatchScript(config(), CLAUDE_PROXY_EFFORT_FIXTURE);
+      const agentModels = agentToolModels(out);
+      const known = knownModels(out);
+      for (const name of ['sol', 'sol61', 'plain', 'plain2']) {
+        expect(agentModels.filter(model => model === name), name).toHaveLength(1);
+        expect(known.filter(model => model === name), name).toHaveLength(1);
+      }
+      expect(agentModels).not.toContain('unconfigured');
+      expect(known).not.toContain('unconfigured');
+      // An aliased model is known by its aliases, never its canonical id.
+      expect(agentModels).not.toContain('clodex:openai-oauth:gpt-6.1-sol');
+      expect(out).toContain(
+        `Additional custom models: sol = ${SOL_LABEL}; sol61 = ${SOL_LABEL}; `
+        + `plain = ${PLAIN_LABEL}; plain2 = ${PLAIN_LABEL}.`,
+      );
+    });
+
+    // Local patches are checked against these proofs. A local edit that redirects only the
+    // second alias leaves its case label in place, so re-running the resolver patch is a no-op
+    // and cannot notice it: the proof of that alias's own case is what does.
+    it('protects each alias\'s resolver case on its own before local patches run', () => {
+      const desired = config();
+      const patched = applyClodexPatches(CLAUDE_FIXTURE, desired);
+      const proofs = captureBuiltInPatchProofs(patched.content, desired, patched.results);
+      expect(builtInPatchProofsChanged(patched.content, proofs)).toBe(false);
+      expect(builtInPatchProofsChanged(
+        patched.content.replace('case"sol61":return "sol61";', 'case"sol61":return "sol";'),
+        proofs,
+      )).toBe(true);
+    });
   });
 });
