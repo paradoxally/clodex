@@ -49,12 +49,12 @@ describe('OpenCode Go catalog', () => {
 
     expect(OPENCODE_GO_SOURCE).toBe('https://models.dev/api.json');
     expect(new Date(OPENCODE_GO_SOURCE_FETCHED_AT).toISOString()).toBe(OPENCODE_GO_SOURCE_FETCHED_AT);
-    expect(models).toHaveLength(20);
+    expect(models).toHaveLength(22);
     expect(new Set(ids).size).toBe(models.length);
     expect(ids).not.toContain('grok-4.5');
     expect(new Set(models.map(model => model.modelFormat))).toEqual(new Set(['anthropic', 'openai']));
     expect(models.filter(model => model.modelFormat === 'anthropic')).toHaveLength(4);
-    expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(16);
+    expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(18);
     expect(models.filter(model => model.npm === '@ai-sdk/openai').map(model => model.id).sort())
       .toEqual(['gpt-5.6-luna', 'gpt-6-luna', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']);
     // clodex sends graded effort only for recognised OpenAI/Codex families, so
@@ -75,6 +75,18 @@ describe('OpenCode Go catalog', () => {
       contextWindow: 1_000_000,
       modalities: ['text', 'image'],
     });
+    for (const [id, modalities] of [['glm-5.3', ['text']], ['glm-5.3-flash', ['text', 'image']]] as const) {
+      expect(byId.get(id), id).toMatchObject({
+        modelFormat: 'openai',
+        npm: '@ai-sdk/openai-compatible',
+        apiUrl: OPENCODE_GO_COMPLETIONS_BASE_URL,
+        contextWindow: 1_000_000,
+        modalities,
+        compatibility: {
+          reasoningEffortMap: { off: null, minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' },
+        },
+      });
+    }
     expect(byId.get('deepseek-v4-pro')).toMatchObject({
       modelFormat: 'openai',
       npm: '@ai-sdk/openai-compatible',
