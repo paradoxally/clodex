@@ -42,6 +42,10 @@ const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4.1-flash': 'anthropic-messages',
   'deepseek-v4-pro': 'openai-completions',
   'glm-5.2': 'openai-completions',
+  // Measured 2026-10-05: both GLM-5.3 models answer 200 on /v1/chat/completions
+  // and 400 ModelProtocolUnsupported on /v1/messages and /v1/responses.
+  'glm-5.3': 'openai-completions',
+  'glm-5.3-flash': 'openai-completions',
   // Measured 2026-09-16: /v1/chat/completions answers HTTP 500 for every
   // request, /v1/responses answers 200 — including streamed tool calls.
   'gpt-5.6-luna': 'openai-responses',
@@ -132,6 +136,25 @@ const PATCHES = Object.assign(Object.create(null), {
     // actually talk to, so its narrower set wins until the wider one is
     // validated live.
     reasoningEffortMap: { off: null, minimal: null, low: null, medium: null, high: 'high', xhigh: null, max: 'max' },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'glm-5.3': {
+    // The feed's low/high/max, held to it by assertEffortLadders. Go's own
+    // validator also lists medium and xhigh, and both answered 200 live
+    // (2026-10-05); widening to them is a deliberate change, not a refresh.
+    // `none` is refused ("GLM-5.3 is a thinking-only model"), so off stays null.
+    reasoningEffortMap: { off: null, minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'glm-5.3-flash': {
+    // Same feed ladder as glm-5.3. Go accepts `none` here but the model still
+    // reasons (2026-10-05), so off stays null rather than claiming it disables
+    // thinking.
+    reasoningEffortMap: { off: null, minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' },
     supportsStore: false,
     supportsDeveloperRole: false,
     maxTokensField: 'max_tokens',

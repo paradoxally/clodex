@@ -123,6 +123,73 @@
     "family": "glm"
   },
   {
+    "id": "glm-5.3",
+    "name": "GLM-5.3",
+    "contextWindow": 1000000,
+    "cost": {
+      "input": 1.4,
+      "output": 4.4,
+      "cache_read": 0.26
+    },
+    "modelFormat": "openai",
+    "npm": "@ai-sdk/openai-compatible",
+    "apiUrl": "https://opencode.ai/zen/go/v1",
+    "reasoning": true,
+    "modalities": [
+      "text"
+    ],
+    "compatibility": {
+      "reasoningEffortMap": {
+        "off": null,
+        "minimal": null,
+        "low": "low",
+        "medium": null,
+        "high": "high",
+        "xhigh": null,
+        "max": "max"
+      },
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "maxTokensField": "max_tokens"
+    },
+    "upstreamModelId": "glm-5.3",
+    "family": "glm"
+  },
+  {
+    "id": "glm-5.3-flash",
+    "name": "GLM-5.3-Flash",
+    "contextWindow": 1000000,
+    "cost": {
+      "input": 0.15,
+      "output": 0.5,
+      "cache_read": 0.03
+    },
+    "modelFormat": "openai",
+    "npm": "@ai-sdk/openai-compatible",
+    "apiUrl": "https://opencode.ai/zen/go/v1",
+    "reasoning": true,
+    "modalities": [
+      "text",
+      "image"
+    ],
+    "compatibility": {
+      "reasoningEffortMap": {
+        "off": null,
+        "minimal": null,
+        "low": "low",
+        "medium": null,
+        "high": "high",
+        "xhigh": null,
+        "max": "max"
+      },
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "maxTokensField": "max_tokens"
+    },
+    "upstreamModelId": "glm-5.3-flash",
+    "family": "glm"
+  },
+  {
     "id": "gpt-5.6-luna",
     "name": "GPT-5.6 Luna",
     "contextWindow": 922000,
