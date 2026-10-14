@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/%40bman654%2Fclodex.svg)](https://www.npmjs.com/package/@bman654/clodex)
 
-**clodex** lets you use your ChatGPT/Codex plan, OpenAI API models, or OpenCode Go models with Claude Code as first-class model choices.
+**clodex** lets you use your ChatGPT/Codex plan, OpenAI API models, OpenCode Go or Ollama Cloud models, or models from a custom OpenAI-compatible server with Claude Code as first-class model choices.
 You can use them anywhere you use Anthropic models like Opus and Sonnet — as the main session model, and in subagents, workflows, and agent teams. Clodex integrates them directly into Claude Code, using Claude Code's system prompt.
 It works with your existing Claude Code plan as well as your Codex plans WITHOUT violating Anthropic's ToS.
 No messing with CMUX or child codex processes or any of that stuff.
@@ -43,6 +43,7 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 | OpenAI (ChatGPT / Codex plan) | OAuth | Fully supported by the clodex maintainer |
 | OpenCode Go | API key | Community-supported — maintained by its contributor |
 | Custom OpenAI-compatible server (OpenRouter, vLLM, …) | API key, or none | Community-supported — maintained by its contributor |
+| Ollama Cloud | API key | Community-supported — maintained by its contributor |
 
 **Community-supported** means the maintainer holds no account for that service,
 so it cannot be exercised against the live API here or debugged when the vendor
@@ -124,7 +125,7 @@ Launch Claude Code bridged to configured model providers. Unrecognized flags (an
 | `--dry-run` | Run the wizard but print a launch preview instead of launching (never persists anything) |
 | `--trace` | Write debug logs to `~/.clodex/logs/` and show errors on exit |
 | `--fast` | Request Codex fast mode (`service_tier=priority`) for ChatGPT/Codex OAuth routes; equivalent to `CLODEX_SERVICE_TIER=fast` |
-| `--provider <id>` | Endpoint mode only: boot provider id (`openai`, `openai-oauth`, or `opencode-go`); with `--model`, skips the wizard |
+| `--provider <id>` | Endpoint mode only: boot provider id of a configured provider (e.g. `openai`, `openai-oauth`, `opencode-go`, `ollama-cloud`, or `custom-<name>`); with `--model`, skips the wizard |
 | `--model <id>` | Endpoint mode only: boot model id; with `--provider`, skips the wizard |
 | `--context <model=stop>` | Use a different share of a model's context window for this launch only; never saved. Reaches Claude Code through the exported catalog, so a binary patched by `clodex patch` keeps its baked window until the stop is saved and the patch re-run |
 | `--help`, `--version` | Help / version |
@@ -243,11 +244,48 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 | *(none)* | Interactive manager: search all providers or browse one at a time |
 | `--list` | Print the exact `clodex:<provider-id>:<model-id>` names (and aliases) without opening the manager |
 | `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-6-sol` (the `clodex:` prefix is optional in the target) |
+| `--daybreak` | With `--alias`: send that alias's requests under OpenAI's Daybreak cybersecurity access program. See [Daybreak aliases](#daybreak-aliases) |
 | `--unalias <name>` | Remove a saved short name |
 | `--context <model=stop>` | Choose how much of a model's context window to use: `standard`, `max`, `default` to clear, or a token count such as `500k`. Applies to this run unless `--save` is given |
 | `--save` | With `--context`: store the stop as that model's default |
 | `--json` | Print resolved metadata for saved favorites as JSON (ids, aliases, context stop and windows, output limit, pricing boundary, effort levels). A model saved under several aliases lists them all in `aliases`, in saved order; `alias` is the first. Diagnostics go to stderr so stdout stays parseable |
 | `--help`, `--version` | Help / version |
+
+#### Daybreak aliases
+
+OpenAI's [Daybreak](https://developers.openai.com/api/docs/guides/daybreak) cybersecurity access
+programs are selected request by request. On a ChatGPT/Codex sign-in (`openai-oauth`), an alias
+saved with `--daybreak` selects one on every request it sends:
+
+```bash
+clodex models --alias luna-blue=clodex:openai-oauth:gpt-6-luna --daybreak
+```
+
+Requests through `luna-blue` then carry the Daybreak program; the same model under its `clodex:` id
+or another alias is unchanged. You don't choose the program: your account's model catalog lists the
+programs each model accepts, and clodex picks Daybreak Blue, or Daybreak Red when that is the only
+one offered — the same choice Codex makes.
+
+Eligibility depends on the model and your account, as recorded in your saved model catalog:
+
+- `--daybreak` refuses to save the alias if the catalog doesn't offer Daybreak for the model, or if
+  the alias name is one the endpoint server already answers as a model id (such as `gpt-6-luna`).
+  If a provider you add later has a model with exactly that id, `clodex server --endpoint` serves
+  that model under the name instead and reports the alias inactive at startup.
+- A catalog saved by an older clodex has no Daybreak information until you run
+  `clodex providers refresh-models`.
+- If a refresh later shows the model no longer offers Daybreak, the alias becomes inactive.
+  `clodex models --list` and server startup say why, and its requests are refused with that reason
+  rather than sent without Daybreak. Machine-readable `clodex claude` launches skip the startup
+  report, so check `clodex models --list`.
+- Until you refresh, a model whose Daybreak access was withdrawn fails with OpenAI's HTTP 403, which
+  Claude Code shows as an authentication error.
+
+`clodex models --list` shows which aliases send Daybreak. To turn it off, save the alias again
+without `--daybreak`.
+
+The dedicated Daybreak model (`gpt-daybreak-blue-latest`) needs no flag; OpenAI applies Daybreak
+Blue to it already.
 
 #### Context stops and the pricing boundary
 
@@ -306,7 +344,7 @@ Two things worth knowing about the numbers:
 | Subcommand | Effect |
 | --- | --- |
 | *(none)* | Provider hub wizard |
-| `add` | Add OpenAI or OpenCode Go with an API key, add a custom OpenAI-compatible server by base URL, or sign in with ChatGPT |
+| `add` | Add OpenAI, OpenCode Go or Ollama Cloud with an API key, add a custom OpenAI-compatible server by base URL, or sign in with ChatGPT |
 | `auth openai` | Sign in with ChatGPT/Codex-plan OAuth (device code; `--browser` for workspaces that disable device codes) |
 | `list` | Show configured providers |
 | `remove <id>` | Remove a provider by id |
@@ -326,7 +364,9 @@ and their seeded flags when discovery omits them. Models not using Responses-Lit
 this version header and are not hidden by this check. This check does not establish your
 account's model entitlement.
 
-Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), and `opencode-go` (OpenCode Go API key). OpenCode Go exposes its Anthropic Messages, Chat Completions, and Responses models; only entries whose transport has been verified, live or against OpenCode's per-model endpoint table, are included. See [OpenCode Go provider](docs/opencode-go.md).
+Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), `opencode-go` (OpenCode Go API key), and `ollama-cloud` (Ollama Cloud API key). OpenCode Go exposes its Anthropic Messages, Chat Completions, and Responses models; only entries whose transport has been verified, live or against OpenCode's per-model endpoint table, are included. See [OpenCode Go provider](docs/opencode-go.md).
+
+Ollama Cloud exposes a curated set of four Chat Completions models from `https://ollama.com/v1`; other models Ollama Cloud lists are hidden. See [Ollama Cloud provider](docs/ollama-cloud.md).
 
 A **custom OpenAI-compatible server** is any OpenAI-style API, given by its base URL (the part before `/chat/completions`), such as `https://openrouter.ai/api/v1`. `providers add` asks for a name, the base URL and an API key (leave it empty for a local server without auth), lists the server's models to check the connection, and saves the provider as `custom-<name>`. Its models then appear in `clodex models`; once saved as favorites they are addressed as `clodex:custom-<name>:<model>` and can be given a short alias with `clodex models --alias`. The base URL is checked before anything is saved and again when its models are refreshed: plain `http://` is accepted only after you confirm it, and only if every address the host resolves to is on this machine, your LAN or a private network such as Tailscale (loopback, private, unique-local IPv6 or carrier-grade-NAT `100.64.0.0/10` addresses); `https://` is accepted on any of those networks as well as the public internet; and a link-local (`169.254.0.0/16`, `fe80::/10`) or well-known cloud-metadata address is refused whether or not HTTP was approved. A server on another machine in your tailnet can be added by its `100.x` address, its MagicDNS name, or the HTTPS name `tailscale serve` gives it. A model's id and name are stored with surrounding whitespace trimmed, and a model whose trimmed id or name still contains a control character is skipped, whether the list is fetched by `providers add` or by `providers refresh-models`, and error text from the server is shown with control characters replaced by spaces. Only the OpenAI-compatible kind is offered in the menu.
 
@@ -459,8 +499,76 @@ clodex --version    # version
   `CLODEX_UPSTREAM_MAX_RETRIES` value takes precedence on the HTTP MITM path;
   otherwise, Claude Code's own `CLAUDE_CODE_MAX_RETRIES=0` disables that replay
   so telling the client never to resend a request is not quietly undone one
-  layer down.
+  layer down. On that path the retry setting controls only this pooled-connection
+  replay. A separate outage hold, with its own setting, also runs there; see
+  the next entry.
   Recovered requests appear in the inference log as `response_retried`.
+- **Outage hold (proxy mode):** when a Claude Code request cannot reach
+  `api.anthropic.com` at all, clodex keeps retrying it for a while instead of
+  answering 502 at once, so a laptop waking from sleep, a Wi-Fi switch or a VPN
+  reconnect does not end the turn. A failure qualifies when the name does not
+  resolve, the connection is refused or has no route, or the connection is
+  reset or times out before its TLS handshake completes. clodex sends the
+  request only after the handshake, so none of these attempts sent anything
+  and retrying cannot submit the request twice. A failure after the handshake,
+  a certificate error, and a reset on a reused connection are not held. Retries
+  wait 1, 2, 4 and 8 seconds, then 15 seconds between attempts. The hold is a
+  deadline counted from when the request arrived: at the deadline clodex drops
+  any attempt that has not finished its handshake and answers 502, with a
+  message saying the outage hold expired and, if there was one, naming the last
+  upstream error.
+  If a reused connection is reset after the deadline and clodex replays the
+  request, the replay gets a 502 at once unless it can go out on another
+  reused connection.
+  `CLODEX_PASSTHROUGH_OUTAGE_HOLD_MS` sets the deadline in milliseconds. The
+  default is `120000` (2 minutes) and `0` turns the hold off. Values above
+  `570000` clamp to it with a one-time warning; malformed values are reported
+  once and ignored. Only messages generation (`/v1/messages`, including
+  `/v1/messages?beta=true`) is held. `count_tokens`, OAuth, startup and
+  telemetry calls still get their 502 at once. Each held retry appears in the
+  inference log as `response_retried` with `outageHold: true`.
+  Claude Code resends a 502 itself, so at its default of 10 retries a turn can
+  last through roughly 25 minutes of outage at the default hold. That figure is a
+  projection from Claude Code's retry schedule, not a measurement. Claude Code
+  can also give up sooner than the hold. It waits 180 seconds plus 1 second per
+  32 KiB of request body for a query's first response headers. After one
+  request gets no response, later requests in the query get `API_TIMEOUT_MS`
+  minus 1 second (599 seconds at its default), and a second request with no
+  response ends the turn even with retries left. At Claude Code's defaults the
+  default hold answers inside the first window, so a request still waiting for
+  its connection gets its 502 before either limit. A hold above about
+  180 seconds means the query's first held request is cut off by Claude Code
+  instead, and the hold must then stay below the longer window; the `570000`
+  ceiling does that at Claude Code's default `API_TIMEOUT_MS`. If you lower
+  `API_TIMEOUT_MS` in Claude Code's environment so that `API_TIMEOUT_MS` minus
+  1 second is shorter than the hold, every turn whose outage outlasts both
+  windows ends on that second no-response after about min(180 s plus the body
+  allowance, `API_TIMEOUT_MS` − 1 s) + (`API_TIMEOUT_MS` − 1 s); keep the hold
+  below `API_TIMEOUT_MS` − 1 s, or set it to `0`. For
+  `0 < API_TIMEOUT_MS < 11000`, Claude Code skips both of those waits for
+  response headers, but its own request timeout still applies: if that is
+  shorter than the hold, it aborts each held request before clodex can return
+  its 502.
+  The cost is a longer wait when the outage does not end: with the hold off,
+  Claude Code gives up on a persistent fast-failing outage after about 3
+  minutes, and at the default hold after about 25 (both projections).
+  The hold has its own switch. `CLODEX_UPSTREAM_MAX_RETRIES=0` and
+  `CLAUDE_CODE_MAX_RETRIES=0` do not turn it off, because a held request was
+  never sent. If you want outages to fail fast, for example in a headless
+  `claude -p` or CI run that would otherwise wait through each hold unless its
+  caller sets a limit, also set `CLODEX_PASSTHROUGH_OUTAGE_HOLD_MS=0`. The
+  server process reads the variable: with a standalone `clodex server`, set it
+  when starting the server, because setting it on `clodex-claude` changes
+  nothing. When clodex itself uses `HTTPS_PROXY`, the hold covers an
+  unreachable proxy and a tunnel that fails before its TLS handshake completes.
+  When the proxy is up but Anthropic is not, the proxy usually answers clodex's
+  `CONNECT` with an error status, and that error response comes back at once,
+  as it does with the hold off. If the proxy closes the connection before
+  replying, clodex answers 502 at once; if it resets the connection instead,
+  the request is held as for an unreachable proxy. A replay after the deadline
+  that needs a new tunnel waits for the proxy's `CONNECT` reply and is not cut
+  while it waits, so a proxy that never replies leaves that request with no
+  response, and an error reply to it gets clodex's 502 instead of the proxy's.
 - **Connection pacing (ChatGPT/Codex plans):** when many agents run at once,
   clodex spaces out the new connections it opens to OpenAI, which should make a
   burst of parallel work less likely to trip OpenAI's own rate limit. (In the

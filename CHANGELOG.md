@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.21.0](https://github.com/bman654/clodex/compare/v2.20.0...v2.21.0) (2026-10-13)
+
+
+### Features
+
+* **models:** add Daybreak aliases for cybersecurity work on eligible ChatGPT models ([#327](https://github.com/bman654/clodex/issues/327)) ([c1f02eb](https://github.com/bman654/clodex/commit/c1f02eb21789289bea5d9e1f138bcb1b38d29201))
+
+
+### Bug Fixes
+
+* **oauth:** reuse ChatGPT's prompt cache for subagents and resumed chats ([#326](https://github.com/bman654/clodex/issues/326)) ([ad2f793](https://github.com/bman654/clodex/commit/ad2f7935b4534eb4252d72552e943f75e2e00cce))
+
+## [2.20.0](https://github.com/bman654/clodex/compare/v2.19.0...v2.20.0) (2026-10-13)
+
+
+### Features
+
+* **providers:** add Ollama Cloud so its Kimi, GLM and DeepSeek models can run in Claude Code ([#320](https://github.com/bman654/clodex/issues/320)) ([c93a42d](https://github.com/bman654/clodex/commit/c93a42dacde0dd393f2df2b30df21140e849e3a1))
+
+## [2.19.0](https://github.com/bman654/clodex/compare/v2.18.10...v2.19.0) (2026-10-10)
+
+
+### Features
+
+* **proxy:** keep Claude Code turns alive through network outages instead of failing ([#316](https://github.com/bman654/clodex/issues/316)) ([7f091fb](https://github.com/bman654/clodex/commit/7f091fb1ad74784eb08f85da0c46b1c3af3b8733))
+
+
+### Bug Fixes
+
+* **cli:** stop clodex occasionally hanging after a command finishes on Node 24 ([#319](https://github.com/bman654/clodex/issues/319)) ([34c4791](https://github.com/bman654/clodex/commit/34c47910e29e5c5d7994305186ae413ba7a5d609))
+
 ## [2.18.10](https://github.com/bman654/clodex/compare/v2.18.9...v2.18.10) (2026-10-06)
 
 

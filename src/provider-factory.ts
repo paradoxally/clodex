@@ -14,6 +14,8 @@ import {
   injectClaudeIdentity,
 } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import { withAccessPrograms, type AccessPrograms } from './daybreak.js';
+import { OLLAMA_CLOUD_PROVIDER_ID } from './data/ollama-cloud-models.js';
 import {
   transformOpenAiCompatibleRequestBody,
   type ModelRuntimeCompatibility,
@@ -117,6 +119,8 @@ export interface ProviderModelSpec {
   preferWebSockets?: boolean;
   /** Provider-neutral per-model wire quirks. */
   compatibility?: ModelRuntimeCompatibility;
+  /** Responses `access_programs` for ChatGPT/Codex OAuth requests (a Daybreak alias). */
+  accessPrograms?: AccessPrograms;
   /** Optional debug logger (wired to the proxy trace log) for transport-level diagnostics. */
   onDebug?: (msg: string) => void;
   /** Optional privacy-safe structured WebSocket diagnostics. */
@@ -209,11 +213,14 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
           // same connection-local previous_response_id continuation cache.
           ...(useResponsesEndpoint
             ? {
-                fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
-                  providerId: spec.providerId ?? 'openai',
-                  accountId,
-                  onDiagnostic: spec.onWebSocketDiagnostic,
-                }),
+                fetch: withAccessPrograms(
+                  createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
+                    providerId: spec.providerId ?? 'openai',
+                    accountId,
+                    onDiagnostic: spec.onWebSocketDiagnostic,
+                  }),
+                  spec.accessPrograms,
+                ),
               }
             : {}),
         }
@@ -275,6 +282,10 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       ...(spec.authType !== 'none' && apiKey.trim() ? { apiKey } : {}),
       ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
       ...(spec.headers ? { headers: spec.headers } : {}),
+      // ollama.com sends a streamed usage chunk only when the request carries
+      // stream_options.include_usage (observed 2026-10-13); without it every
+      // streamed turn reports output_tokens 0. Scoped to this provider only.
+      ...(spec.providerId === OLLAMA_CLOUD_PROVIDER_ID ? { includeUsage: true } : {}),
       ...(spec.compatibility
         ? {
             transformRequestBody: (body: Record<string, unknown>) =>

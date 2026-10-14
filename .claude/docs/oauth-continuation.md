@@ -53,8 +53,9 @@ from an in-process subagent and neither on the main agent's — present in every
 to 2.1.238, so nothing here is gated on a client version. The relay reads them in `proxy.ts` /
 `router.ts` (the MITM forwards them to the relay adapter alongside the session header), carries them
 through `withResponsesWebSocketDiagnosticContext`, and `responsesWebSocketPartitionKey` appends the
-agent id to the key material. `prompt_cache_key` is untouched, so siblings still share the
-server-side prefix cache; only the head lookup is per agent.
+agent id to the key material. `prompt_cache_key` is untouched and also rides each new socket's
+handshake as `session-id`, which is what measurably lets a fresh socket reuse a prefix the session
+already warmed (see `translation.md`); only the head lookup is per agent.
 
 **What this closes is the one shape the gate above cannot.** A sibling whose opening turn differs
 from the turn in flight already keeps its own head — that is the gate's job. A sibling whose opening
@@ -79,7 +80,8 @@ cross-sibling stitch the shared partition permits when visible histories coincid
 busy candidate — every one diverged at item 0 — so this shape did not occur in that account's
 traffic at all. It is real for redundancy and consensus fan-outs that hand every sibling the same
 prompt; it is not a common case. Giving each sibling its own `prompt_cache_key` as well was tried
-and was not distinguishable from sharing it, so the key stays shared.
+and was not distinguishable from sharing it, so the key stays shared. That trial predates the
+`session-id` header, so it says nothing about per-agent versus shared header values.
 
 Gating instead on "any head in this partition is busy" is expensive *cumulatively*: an isolated socket
 retains no head, so the next turn of that same subagent isolated again for as long as anything in the
@@ -587,8 +589,13 @@ fallback rung. An upstream value above clodex's 60s client-facing cap remains in
 not promoted into repeated in-process waits. A deadline during retry
 backoff preserves the provider failure that prompted the retry, while a deadline during a silent
 active provider call remains a timeout. Proxy mode's raw HTTP MITM path shares the retry setting but
-retains its independent ceiling of five and one-retry default; other direct raw relays add no
-transport-failure replay, although an OAuth 401 refresh can still start a new authenticated call.
+retains its independent ceiling of five and one-retry default; there the setting governs only the
+pooled-socket replay. A second, independently controlled outage hold also runs on that path
+(`CLODEX_PASSTHROUGH_OUTAGE_HOLD_MS`, default 120 s, messages generation only): it retries attempts
+on a fresh socket that failed before TLS completed, up to a deadline counted from the request's
+arrival, and `CLODEX_UPSTREAM_MAX_RETRIES=0` / `CLAUDE_CODE_MAX_RETRIES=0` do not turn it off.
+Other direct raw relays add no transport-failure replay, although an OAuth 401 refresh can still
+start a new authenticated call.
 **This policy can recover only while no model output has been exposed downstream**; replay after
 partial output could duplicate content or tool calls.
 
