@@ -390,7 +390,8 @@ relocates the Bun section and strands its old copy; that is independent of the r
   published builds refused to patch at all. Neither end was load-bearing for the replacement: what
   the transform needs is the function's opening brace, its body, and its closing brace. Describe
   each end by what the builder MEANS and let back-references tie the repeats:
-  * the head runs from `function X(){` + `let`/`let{`/`let[` to a pinned name over `[^;{}]`
+  * the head runs from `function X(){` (or, from 2.1.304, `function X(e){` with one plain
+    parameter) + `let`/`let{`/`let[` to a pinned name over `[^;{}]`
     characters **or balanced `{...}` groups**, plus one optional trailing **unclosed** `{…` so the
     pin may sit inside a destructuring pattern — that admits the destructuring and the `??{}` while
     still making it impossible to consume the enclosing function's closing brace, which would need
@@ -432,7 +433,8 @@ relocates the Bun section and strands its old copy; that is independent of the r
   minifier emits" is measurably false: the walk reads `/` as division, so an unescaped `{` or `}`
   inside a regex literal mis-tallies it, and that is ordinary — each 2.1.260 build holds 90 such
   literals, and the walk disagrees with a real parser on 3-4 of the named `function X(){` bodies
-  this anchor can open, per bundle, in all 27. A review built a silent wrong
+  this anchor can open, per bundle, in all 27. One-parameter bodies, admitted since 2.1.304, were
+  not counted. A review built a silent wrong
   bind from it (a decoy carrying `/[{]/`, an arrow-function builder carrying `/[}]/`, phantom braces
   cancelling so `bound` lands on 0) that emits a builder reading `_clodexChildEnv` without declaring
   it — every child command would throw. It reproduces on the pre-2.1.260 anchor too, so it belongs
@@ -507,6 +509,40 @@ relocates the Bun section and strands its old copy; that is independent of the r
   from a nested block refuses loudly even when a later one would bind — no measured build does
   that. `.claude/harnesses/cc290-patch10-execute-real-builder` executes the patched builder from all
   eight 2.1.290 bundles on both sides of the new settings-env branch.
+- **And the signature.** Claude Code 2.1.304 gave the child-env builder an optional parameter, a
+  base env that the parent's `process.env` is spread over
+  (`function is(e){…i={...e,...process.env}…`), and made the passthrough require it to be absent
+  (`if(e===void 0&&…)return process.env`). The head admitted only a zero-arg `function X(){` and
+  the body check required a literal `{...process.env`, so `clodex patch` refused the release. The
+  head now admits one plain parameter and the body check asks only that the body spread
+  `...process.env`. Output over 2.1.296–2.1.303 is byte-identical to version 15's.
+  `.claude/harnesses/cc304-patch10-execute-real-builder` executes the patched builder from all
+  eight 2.1.304 bundles with and without the parameter.
+
+  **The parameter's values do reach a child, and the restore does not police them.** The patched
+  builder spreads the restored env over the base, so a key the restore keeps wins, but a key it
+  REMOVES (original `null`) shows the base's value through. Two calls pass the parameter in all
+  eight 2.1.304 builds, both with the shell snapshot's exports. `Object.keys(is(this.#r))` reads
+  only the key set. The Bash tool's spawn env does not: `{...is(w),SHELL:…}`, with
+  `envDefaults:r==="bash"&&!q&&!ot?jP().shellExports:void 0` (darwin-arm64 spelling; the other
+  builds rename the locals but test the same conditions), carries the base's values into the
+  command. Claude Code collects those exports only under a desktop host entrypoint
+  (`claude-desktop`, `claude-desktop-3p`) and not on Windows; everywhere else the base is
+  `undefined`.
+
+  On the clodex-only path that is safe because of where the exports come from, not because of the
+  transform. The snapshot shell is spawned with the no-argument builder's env, so it does not
+  inherit the injected proxy, CA or contract:
+  `{...process.env.CLAUDE_CODE_DONT_INHERIT_ENV?{}:is(),SHELL:e,GIT_EDITOR:"true",CLAUDECODE:"1"}`.
+  What it reports is its whole environment after startup, and the parser keeps a name only if
+  `is()`, called when the snapshot finishes, leaves it unset. So the base cannot recover the
+  injected values from the live parent env. The builder's existing overlays still apply to the
+  snapshot shell as to any other child: settings env, and the remote agent-proxy fallback described
+  under "Two paths overlay the child env AFTER PATCH 10's restore" in `claude-code-internals.md`. A
+  later release that passes an unsanitized base, such as the live `process.env`, could put the
+  injected values back in front of a child, so re-check every arg-passing call when the builder
+  moves. Count callers with a scope-aware walk, not a text search: a lookbehind that excludes `.`
+  skips the 18 spread calls (`...is()`) and the Bash tool's `...is(w)`.
 - **Calibrate a patch-anchor weakness by corpus reachability and by which direction it fails, not
   by whether an attack can be constructed** — one always can, against every site we ship.
   PATCH 5's surviving hole needs upstream to make two coordinated changes at once (respell its own
