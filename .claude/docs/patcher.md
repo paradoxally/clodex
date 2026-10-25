@@ -107,6 +107,15 @@ So the blob is published, not rebuilt:
   compile what it finds. JSC's key also carries the source length, so an edit that changes a
   module's length is rejected anyway; that covers every built-in patch site but NOT a same-length
   local patch, which is the reachable case this closes.
+- **On a linked-payload blob the candidate's bytecode ranges are cleared before the repack.**
+  Since 2.1.310 every module's `bytecode` range runs to the end of one shared ~100 MB payload (see
+  `claude-code-internals.md`). tweakcc copies each range separately, so its repack would build a
+  ~230 GB blob; the sizing mirror predicted exactly that and refused all eight builds with
+  `clodex is reading overlapping payload ranges`. `prepareRepackInput` zeroes every bytecode pair
+  in the candidate's module table (never a backup) between `planBundleWrite` and `writeContent`,
+  and `repackedBlobBytes` counts those ranges as empty. Nothing is lost: the repack's output is
+  overwritten by the pristine blob the plan already read, ranges included. Keyed on the flag, so
+  older releases repack byte for byte as before.
 - **`SOURCE_TEXT_CONTIGUOUS` is cleared** because the appended sources make it false. It is only a
   `madvise` hint; a blob that does not claim it simply does not get the hint.
 - **The published blob is the same total length as the section tweakcc produced**, so the trailer
@@ -206,11 +215,20 @@ remembers the eight bytes it displaced, and after the repack copies the address 
 the global's real home and puts the displaced bytes back. The published binary differs from an
 unaided repack in exactly one place: the global, holding the value it was always meant to hold.
 
-- **The real global is identified, not guessed:** the ONE 8-byte occurrence of `.bun`'s address
-  inside the writable segment and outside `.bun`'s own payload. Occurrences inside the payload are
-  coincidences in compressed JavaScript — up to five on the arm64 builds measured (0, 0, 5 and 3
-  across the four 2.1.257 ELF builds) — and are excluded by range. Anything other than exactly one
-  candidate is refused rather than patched.
+- **The real global is identified, not guessed:** the ONE 8-byte-aligned occurrence of `.bun`'s
+  address inside the writable segment and outside `.bun`'s own payload. Occurrences inside the
+  payload are coincidences in compressed JavaScript — up to five on the arm64 builds measured (0, 0,
+  5 and 3 across the four 2.1.257 ELF builds) — and are excluded by range. Unaligned occurrences
+  are excluded too. On linux-x64 2.1.304 and 2.1.307 the global was the only occurrence outside
+  the payload, so nothing depended on that; on 2.1.308 linux-x64 `.bun` landed at `0x7000000`,
+  whose bytes are `00 00 00 07 00 00 00 00`, and every ordinary 64-bit 7 preceded by three zero
+  bytes became a match. Twelve did, in `.data`, `.data.rel.ro` and `.dynamic`, all at
+  `vaddr % 8 == 5`, and the census refused the build with `13 candidates`. The global holds a
+  pointer, and every one measured is 8-byte aligned — the 2.1.257 addresses above, linux-x64
+  2.1.304 and 2.1.307, and all four 2.1.308 ELF builds — and tweakcc's own scan only reads aligned
+  words. On each 2.1.304, 2.1.307 and 2.1.308 build checked it sits directly after `.data.rel.ro`
+  (not checked on 2.1.257). Anything other than exactly one aligned candidate is refused rather
+  than patched.
 - **It never runs where tweakcc already lands on that same address**, so an older release — or a
   future one that goes back to being aligned — takes the path it always took, byte for byte. The
   order matters: the census above runs **first** and the no-op check defers to it. Reversed, a

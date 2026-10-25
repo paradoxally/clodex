@@ -84,6 +84,7 @@ import {
   applyBundleWritePlan,
   assertRecognizedEntryModule,
   planBundleWrite,
+  prepareRepackInput,
   readClaudeBundle,
   splitBundleSource,
   writableModuleIndex,
@@ -1165,6 +1166,9 @@ export async function applyPatch(
         splitBundleSource(loaded.bundle, local.content),
         writable,
       );
+      // Claude Code 2.1.310 overlaps every module's bytecode range by design, and tweakcc's repack
+      // would copy each one into a ~230 GB blob. See `prepareRepackInput`.
+      prepareRepackInput(candidatePath, plan);
       // Claude Code 2.1.257 moved the global Bun reads its blob's address from off the 16 KiB
       // boundary tweakcc's ELF repack scans, so the repack could not find it and threw on all
       // four ELF builds. A no-op everywhere else. See `bun-compiled-pointer.ts`.

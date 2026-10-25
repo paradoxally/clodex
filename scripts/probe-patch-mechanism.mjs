@@ -95,6 +95,7 @@ const {
   applyBundleWritePlan,
   PLACEHOLDER_SLACK_BYTES,
   planBundleWrite,
+  prepareRepackInput,
   readClaudeBundle,
   splitBundleSource,
   writableModuleIndex,
@@ -394,6 +395,9 @@ try {
     const writable = writableModuleIndex(scratch);
     if (writable === null) throw new Error('no module of this build carries a name tweakcc can write to');
     const plan = planBundleWrite(scratch, bundle, splitBundleSource(bundle, written), writable);
+    // Mirrors patcher.ts: since Claude Code 2.1.310 tweakcc's repack would otherwise copy one
+    // overlapping bytecode range per module. See prepareRepackInput in src/bun-bundle.ts.
+    prepareRepackInput(scratch, plan);
     // Mirrors patcher.ts: without this the ELF repack cannot find the global Bun reads its blob's
     // address from on Claude Code 2.1.257, and the probe reports a repack failure that has nothing
     // to do with this build's anchors. See src/bun-compiled-pointer.ts.

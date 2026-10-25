@@ -57,6 +57,12 @@ export interface BunBlobOptions {
    * region no module struct points at, which is exactly what a rebuild of the blob loses.
    */
   bytecodeStringTable?: string;
+  /**
+   * Lay every module's `bytecode` out as Bun's `HAS_LINKED_BYTECODE_PAYLOAD` does (Claude Code
+   * 2.1.310): one shared payload, each module's range running from its own entry to the END of
+   * it, so the ranges overlap. Sets no flag; pass that in `flags`.
+   */
+  linkedBytecode?: boolean;
   /** Corrupt the entry name's recorded length, to exercise the parser's guards. */
   entryNameLengthDelta?: number;
   /** Point the entry name outside the blob, to exercise the bounds guard. */
@@ -71,6 +77,7 @@ export function buildBunBlob(
     flags = 0,
     sourceHashes,
     bytecodeStringTable,
+    linkedBytecode = false,
     entryNameLengthDelta = 0,
     entryNameOutOfBounds = false,
   }: BunBlobOptions = {},
@@ -81,7 +88,8 @@ export function buildBunBlob(
     strings.push(Buffer.from(module.name));
     strings.push(Buffer.from(module.contents ?? ''));
     strings.push(Buffer.from(module.sourcemap ?? ''));
-    strings.push(Buffer.from(module.bytecode ?? ''));
+    // A linked module's bytecode lives in the shared payload below, not in a string of its own.
+    strings.push(Buffer.from(linkedBytecode ? '' : module.bytecode ?? ''));
     if (stringsPerModule === 6) {
       strings.push(Buffer.from(module.moduleInfo ?? ''));
       strings.push(Buffer.from(module.bytecodeOriginPath ?? ''));
@@ -100,6 +108,21 @@ export function buildBunBlob(
     ? null
     : { offset: cursor, length: Buffer.byteLength(bytecodeStringTable) };
   if (stringTable !== null) cursor += stringTable.length + 1;
+  const linkedPayloadAt = cursor;
+  const linkedEntries: ({ offset: number; length: number } | null)[] = [];
+  if (linkedBytecode) {
+    const payloadLength = modules
+      .reduce((sum, module) => sum + Buffer.byteLength(module.bytecode ?? ''), 0);
+    let entryAt = 0;
+    for (const module of modules) {
+      const length = Buffer.byteLength(module.bytecode ?? '');
+      linkedEntries.push(length === 0
+        ? null
+        : { offset: linkedPayloadAt + entryAt, length: payloadLength - entryAt });
+      entryAt += length;
+    }
+    cursor += payloadLength + 1;
+  }
   const modulesOffset = cursor;
   const modulesLength = modules.length * structBytes;
   cursor += modulesLength;
@@ -127,6 +150,10 @@ export function buildBunBlob(
     blob.write(bytecodeStringTable!, stringTable.offset);
     blob[stringTable.offset + stringTable.length] = 0;
   }
+  if (linkedBytecode) {
+    let entryAt = linkedPayloadAt;
+    for (const module of modules) entryAt += blob.write(module.bytecode ?? '', entryAt);
+  }
   if (sourceHashes) {
     sourceHashes.forEach((hash, index) => blob.writeUInt32LE(hash, hashesOffset + index * 4));
   }
@@ -138,7 +165,8 @@ export function buildBunBlob(
   for (let module = 0; module < modules.length; module++) {
     let at = modulesOffset + module * structBytes;
     for (let field = 0; field < stringsPerModule; field++) {
-      const pointer = pointers[module * stringsPerModule + field]!;
+      const linkedEntry = field === 3 && linkedBytecode ? linkedEntries[module] : undefined;
+      const pointer = linkedEntry ?? pointers[module * stringsPerModule + field]!;
       const isEntryName = field === 0 && module === entryPointId;
       // `cursor` is the whole blob, so this points at the first byte past it.
       blob.writeUInt32LE(isEntryName && entryNameOutOfBounds ? cursor : pointer.offset, at);

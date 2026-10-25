@@ -124,6 +124,33 @@ Rebuilding the blob from the module structs — which is what tweakcc's repack d
 and drops all of it. That is what broke `clodex patch` on 2.1.246 on every platform: see
 `patcher.md`.
 
+## Every module's bytecode range overlaps the next (linked payload, 2.1.310)
+
+Claude Code 2.1.310 still reports `Bun v1.4.4`, but a different build of it (`2c2ae6246`;
+2.1.309 is `d8f3d26b0`), and it sets one more `flags` bit: on darwin-arm64 the word is 16,383 on
+2.1.310 and 8,191 on 2.1.309. (linux-x64 and win32-x64 2.1.310 read 15,359: bit 10, cross-compiled
+bytecode, is clear there.) Bits 8–12 (startup module count, module-info string table,
+cross-compiled bytecode, pre-resolved module graph, runtime options) were already set on
+darwin-arm64 2.1.309 and change nothing clodex reads. Bit 13 — set on all eight 2.1.310 builds —
+is `HAS_LINKED_BYTECODE_PAYLOAD` (Bun's `src/standalone_graph/StandaloneModuleGraph.rs`):
+
+- Every module's cached bytecode is an entry in ONE payload, and its `bytecode` `{ offset, length }`
+  runs from that entry **to the end of the payload**. The ranges overlap by design.
+- After the runtime-options record comes one `{ offset, length }` for the payload, then six `u32`
+  region ends; Bun only accepts the payload when they are sorted and the last equals its length.
+
+Measured on darwin-arm64: 2,565 of 2,819 modules carry bytecode and every one of their ranges ends
+at blob offset 122,249,136 — a 100,596,152-byte payload starting at 21,652,984. Summed, those
+ranges come to ~230 GB, which is what tweakcc's repack would copy (see `patcher.md`).
+
+Clearing a patched module's range still works: Bun gives a module with an empty range no bytecode
+and compiles its source, and the payload bytes stay put for every other module. Measured on a
+pristine 2.1.310 darwin-arm64, publishing through `clodex patch`'s own write path: changing only
+the `--help` text in one chunk prints the new text, and changing it only in the entry module
+changes what `--version` prints. A real `clodex patch` of the same build, run against a
+stand-in endpoint, sends every clodex alias in the `Agent` tool's `model` enum where a pristine
+copy sends four.
+
 ## The entry module's name is not stable (renamed in 2.1.229)
 
 The bundle lived in a Bun data blob as one module among ~15 (see the code-split section above for

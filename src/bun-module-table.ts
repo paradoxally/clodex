@@ -47,6 +47,12 @@ export const BUN_BLOB_FLAGS = {
   HAS_BUILTIN_BYTECODE: 1 << 6,
   /** After the builtin-bytecode table: one `{ offset, length }` for the shared string table. */
   HAS_BYTECODE_STRING_TABLE: 1 << 7,
+  /**
+   * Every module's cached bytecode is an entry in ONE shared payload, and its `bytecode` range runs
+   * from that entry to the end of the payload — so the ranges overlap by design. First set by
+   * Claude Code 2.1.310.
+   */
+  HAS_LINKED_BYTECODE_PAYLOAD: 1 << 13,
 } as const;
 
 /**

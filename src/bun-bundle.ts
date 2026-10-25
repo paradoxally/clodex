@@ -42,6 +42,10 @@
 // blob it produces is overwritten afterwards. The section's own 8-byte length header is the one
 // exception: it is left exactly as the repack wrote it, and the published blob is padded to match
 // the length it declares.
+//
+// Since Claude Code 2.1.310 the repack also has to be handed a candidate whose bytecode ranges are
+// cleared: they overlap by design, and copying each would make a blob of hundreds of gigabytes.
+// See `prepareRepackInput`.
 
 import { closeSync, openSync, readSync, writeSync } from 'node:fs';
 
@@ -187,6 +191,11 @@ export interface BundleWritePlan {
   blobAt: number;
   /** Every module that moved, and what it must read back as. */
   appends: BundleAppend[];
+  /**
+   * Whether `prepareRepackInput` has to clear every module's bytecode range in the candidate before
+   * tweakcc repacks it. The placeholder is sized for the repack of the cleared table.
+   */
+  clearsBytecodeBeforeRepack: boolean;
 }
 
 /** `\n---- Bun! ----\n`, which terminates the blob in every container format Bun emits. */
@@ -240,13 +249,14 @@ const APPEND_ALIGNMENT = 8;
  * 2.1.246 darwin-arm64 and 41,412 on 2.1.245, growing with the module count.
  */
 function repackedBlobBytes(table: BunModuleTable, writableIndex: number, contentBytes: number): number {
+  const clearsBytecode = repackClearsBytecode(table);
   let total = 0;
   for (let index = 0; index < table.names.length; index++) {
     const fields = [
       Buffer.byteLength(table.names[index]!, 'utf8'),
       index === writableIndex ? contentBytes : table.contents[index]!.length,
       table.sourcemap[index]!.length,
-      table.bytecode[index]!.length,
+      clearsBytecode ? 0 : table.bytecode[index]!.length,
     ];
     // A 36-byte struct stops after `bytecode`, and tweakcc copies four fields rather than six.
     if (table.structBytes === 52) {
@@ -257,6 +267,14 @@ function repackedBlobBytes(table: BunModuleTable, writableIndex: number, content
   }
   return total + table.modulesLength + table.compileExecArgv.length + 1
     + BUN_OFFSETS_BYTES + BUN_TRAILER.length;
+}
+
+/**
+ * Whether the candidate has to have every module's bytecode range cleared before tweakcc's repack
+ * sees it — see `prepareRepackInput`.
+ */
+function repackClearsBytecode(table: BunModuleTable): boolean {
+  return (table.flags & BUN_BLOB_FLAGS.HAS_LINKED_BYTECODE_PAYLOAD) !== 0;
 }
 
 /**
@@ -373,7 +391,53 @@ export function planBundleWrite(
     flags: table.flags & ~BUN_BLOB_FLAGS.SOURCE_TEXT_CONTIGUOUS,
     blobAt: table.blobAt,
     appends,
+    clearsBytecodeBeforeRepack: repackClearsBytecode(table),
   };
+}
+
+/**
+ * Get the candidate ready for tweakcc's repack. Call it after `planBundleWrite` and before
+ * `writeContent`; it is a no-op unless the plan says otherwise.
+ *
+ * Since Claude Code 2.1.310 (`HAS_LINKED_BYTECODE_PAYLOAD`) every module's cached bytecode is an
+ * entry in one ~100 MB payload, and its `bytecode` range runs from that entry to the END of the
+ * payload. tweakcc's repack copies every module's range separately, so on a real 2.1.310 it would
+ * build a blob of ~230 GB — about 2,560 overlapping copies of the payload. Nothing the repack
+ * builds is kept: `applyBundleWritePlan` overwrites all of it with the pristine blob, whose module
+ * table still carries every range. So the ranges are cleared here, on the candidate only, and the
+ * repack copies none of them.
+ *
+ * Each bytecode `{ offset, length }` pair is zeroed in place in the candidate's module table, then
+ * read back. The pristine bytes `planBundleWrite` already read are untouched.
+ */
+export function prepareRepackInput(path: string, plan: BundleWritePlan): void {
+  if (!plan.clearsBytecodeBeforeRepack) return;
+  const table = readBunModuleTable(path);
+  if (!table
+    || table.blobAt !== plan.blobAt
+    || table.names.length !== plan.names.length
+    || table.names.some((name, index) => name !== plan.names[index])) {
+    throw new Error(`${path} no longer holds the Bun blob the patch was planned around`);
+  }
+  const modules = Buffer.alloc(table.modulesLength);
+  const fd = openSync(path, 'r+');
+  try {
+    if (readSync(fd, modules, 0, modules.length, table.modulesAt) !== modules.length) {
+      throw new Error(`could not read the module table of ${path}`);
+    }
+    for (let index = 0; index < table.names.length; index++) {
+      const structAt = index * table.structBytes;
+      modules.writeUInt32LE(0, structAt + 24); // bytecode offset
+      modules.writeUInt32LE(0, structAt + 28); // bytecode length
+    }
+    writeAll(fd, modules, table.modulesAt, path);
+  } finally {
+    closeSync(fd);
+  }
+  const cleared = readBunModuleTable(path);
+  if (!cleared || cleared.bytecode.some(range => range.offset !== 0 || range.length !== 0)) {
+    throw new Error(`the bytecode ranges of ${path} did not read back as cleared`);
+  }
 }
 
 /**
