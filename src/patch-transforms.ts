@@ -161,8 +161,21 @@ import {
  *
  * 20 — the fork's set at 19 plus upstream's PATCH 10 head and body-check change
  * at 16 (upstream); a number neither side had named.
+ *
+ * 17 (upstream) — PATCH 1 stopped recognising Claude Code 2.1.314 on all eight
+ * published builds. The Agent tool's model enum no longer carries its array
+ * inline: the array is a constant exported from another module and the schema
+ * passes it by name (`model:F(dmi)`), so the anchor, which required a literal
+ * `["sonnet","opus","haiku"…]` inside the call, matched nothing. The bare-name
+ * form is now rewritten to spread the constant. Like 15 and 16, this bump
+ * rescues nobody by itself: on all 81 measured bundles from 2.1.238 to 2.1.304
+ * the output is byte-identical to version 16's, and a 2.1.314 install was
+ * never patched. It is bumped because the anchor changed.
+ *
+ * 21 — the fork's set at 20 plus upstream's PATCH 1 hoisted-enum form at
+ * 17 (upstream); a number neither side had named.
  */
-export const PATCH_TRANSFORMS_VERSION = 20;
+export const PATCH_TRANSFORMS_VERSION = 21;
 
 /**
  * How long a hook must have been running before its banner is drawn on the
@@ -454,15 +467,29 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // through 2.1.223 spell the constructor `.enum(`; 2.1.224+ minifies it to a
   // bare helper call on the model property (`model:xr([...])`), so both are
   // accepted. We append our identities (alias when defined, else the canonical
-  // id) inside the enum so the tool accepts them — this is the same enum
-  // subagent/skill 'model:' frontmatter is validated against, which is why
-  // the short alias has to be the value that lands here.
+  // id) inside the enum so the tool accepts them, and the short alias is the
+  // value that lands here because it is the name the model is asked to send.
+  // Subagent/skill 'model:' frontmatter is NOT validated against this enum on
+  // 2.1.314: those parsers accept any non-empty string.
   // (This same .describe( is patched by PATCH 4 below.)
+  //
+  // 2.1.314 hoisted the array into a constant exported from the Agent tool's
+  // strings chunk (`dmi=["sonnet","opus","haiku","fable"]`) and the schema now
+  // passes it by name: `model:F(dmi).optional().describe(`. That name is
+  // minified per build (dmi, Tpi, Tfi, Ppi) and its definition lives in another
+  // module, so the call is rewritten to spread it — `F([...dmi,"sol"])` —
+  // which keeps every built-in Claude Code ships there, whatever they are, and
+  // leaves the constant itself alone. The bare-name form is pinned to the
+  // Agent tool's own description, because an identifier says nothing about
+  // which enum it is. The spread form is the patched shape of the same site,
+  // matched so a rerun tops it up like an extended literal.
   // ---------------------------------------------------------------------------
   applyOnce(
     'PATCH 1: Agent tool model enum',
-    /((?:\.enum|model:[A-Za-z_$][\w$]*)\()(\["sonnet","opus","haiku"(?:,"[^"]+")*\])\)(\.optional\(\)\.describe\()/,
-    (_m, open, arr, tail) => open! + extendAliasArray(arr!) + ')' + tail!,
+    /((?:\.enum|model:[A-Za-z_$][\w$]*)\()(\["sonnet","opus","haiku"(?:,"[^"]+")*\])\)(\.optional\(\)\.describe\()|(model:[A-Za-z_$][\w$]*\()([A-Za-z_$][\w$]*|\[\.\.\.[A-Za-z_$][\w$]*(?:,"[^"]+")*\])\)(\.optional\(\)\.describe\(`Optional model override for this agent)/,
+    (_m, open, arr, tail, refOpen, ref, refTail) => arr !== undefined
+      ? open! + extendAliasArray(arr) + ')' + tail!
+      : refOpen! + extendAliasArray(ref!.startsWith('[') ? ref! : '[...' + ref! + ']') + ')' + refTail!,
     { required: true, noopIsSkip: true }
   );
 
